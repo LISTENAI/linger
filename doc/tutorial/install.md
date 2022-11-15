@@ -10,7 +10,7 @@
 
 一键安装
 ``` sh
-git clone https://github.com/LISTENAI/linger.git
+git clone git@github.com:LISTENAI/linger.git
 cd linger
 sh install.sh
 ```

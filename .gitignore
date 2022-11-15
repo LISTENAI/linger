@@ -3,3 +3,4 @@ __pycache__
 *.pt
 data.ignore
 linger.egg-info
+dist
