@@ -52,7 +52,10 @@ docker container run -it listenai/linger-thinker:1.0.0 /bin/bash
 
 如果一切正常，运行上面的命令以后，就会返回一个命令行提示符。
 ```shell
-root@66d80f4aaf1e:/linger-thinker#
+root@66d80f4aaf1e:/listenai#
 ```
 
-这表示你已经在容器里面了，返回的提示符就是容器内部的 Shell 提示符。能够执行命令。
+这表示你已经在容器里面了，返回的提示符就是容器内部的 Shell 提示符。这里进入linger目录，能够执行linger相关命令。
+```shell
+root@66d80f4aaf1e:/listenai/linger#sh install.sh
+```
