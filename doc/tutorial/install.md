@@ -40,32 +40,19 @@ pip install pylinger
 docker login 
 ```
 
-登录成功后 , 拉取已经制作好的 image 到本地。
+登录成功后 , 拉取已经制作好的 image 到本地（注意版本号变更）。
 ```shell
-docker pull littlezhan:linger:0.9.0
+docker pull listenai/linger-thinker:1.0.0
 ```
 
 运行容器
 ```shell
-docker container run -it littlezhan:linger:0.9.0 /bin/bash
+docker container run -it listenai/linger-thinker:1.0.0 /bin/bash
 ```
 
 如果一切正常，运行上面的命令以后，就会返回一个命令行提示符。
 ```shell
-root@66d80f4aaf1e:/linger#
+root@66d80f4aaf1e:/linger-thinker#
 ```
 
 这表示你已经在容器里面了，返回的提示符就是容器内部的 Shell 提示符。能够执行命令。
-
-
-
-### 自己制作镜像
-使用本地 Dockerfile , 创建 image 文件，时间较长，请耐心等待
-``` shell
-docker image build -t linger:0.1.0 . (.表示当前路径)
-```
-从 image 文件生成容器
-```shell
-docker container run -it thinker:0.1.0 /bin/bash
-```
-这样就进入了容器中
