@@ -1,8 +1,8 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="linger",
-    version="0.9.0",
+    name="pylinger",
+    version="1.0.0",
     description="linger is package of fix training",
     packages=find_packages(),
     include_package_data=True,
