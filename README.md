@@ -1,6 +1,6 @@
 ![linger_logo](doc/image/linger_logo.png)
 --------------------------------------------------------------------------------
-[![Python][badge-version-python]](#)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pylinger.svg)](https://pypi.org/project/pylinger)
 [![Pip][badge-pip]](https://pypi.org/project/pylinger/)
 [![License][badge-license]](LICENSE)
 [![auto test](https://github.com/LISTENAI/linger/actions/workflows/auto_test.yml/badge.svg)](https://github.com/LISTENAI/linger/actions/workflows/auto_test.yml)
