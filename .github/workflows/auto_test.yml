@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v3
       - name: activate python env
         run: |
-          conda create --name linger_env python=3.7
+          conda create --name linger_env python=3.7  anaconda
           source activate linger_env
       - name: Install dependencies
         run: |
