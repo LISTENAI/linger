@@ -5,7 +5,7 @@ on: [push]
 jobs:
   build:
 
-    runs-on: [self-hosted, linger]
+    runs-on: self-hosted, Linux
 
     steps:
       - uses: actions/checkout@v3
