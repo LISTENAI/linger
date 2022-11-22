@@ -5,14 +5,14 @@ on: [push]
 jobs:
   build:
 
-    runs-on: [self-hosted, Linux , X64 , linger]
+    runs-on: [self-hosted, Linux , X64]
 
     steps:
       - uses: actions/checkout@v3
       - name: activate python env
         run: |
           conda create --name linger_env python=3.7
-          source activate  /home/auto_test/.conda/envs/linger_env
+          source activate linger_env
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
