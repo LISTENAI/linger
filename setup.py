@@ -4,6 +4,9 @@ setup(
     name="pylinger",
     version="1.0.0",
     description="linger is package of fix training",
+    author="listenai",
+	author_email="lingerthinker@listenai.com",
+	url="https://github.com/LISTENAI/linger",
     packages=find_packages(),
     include_package_data=True,
     classifiers=[
