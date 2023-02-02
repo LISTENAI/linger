@@ -39,7 +39,8 @@ The implementation of AI algorithms basically covers six stages: model specifica
 Among them, the function of model regularity check is interspersed in quantization training and model packaging.  
 We first assume that the model structure is fully compatible with the underlying hardware, introduce each stage in the process, and then introduce the specific implementation of the model convention check (in the actual development process, the convention check should be carried out initially on the model structure to avoid rework in subsequent work).
 ### 1. Floating-point training
-Make sure that in the current environment, the floating-point model training can run based on pytorch.  
+We are based on [pythoch-cifar100](https://github.com/weiaicunzai/pytorch-cifar100) for function demonstration
+First of all, Make sure that in the current environment, the floating-point model training can run based on pytorch.  
 ```Shell
 python train.py -net resnet50 -gpu
 ```
