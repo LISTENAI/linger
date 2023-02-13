@@ -62,6 +62,8 @@ tpacker -g xx.onnx -d Ture -o model.bin
 chmod +x ./bin/test_thinker
 ./bin/test_thinker input.bin model.bin output.bin 3 32 32
 ```
+  注意：推理执行需要安装thinker源码，并完成[编译。](https://github.com/LISTENAI/thinker/blob/main/thinker/docs/tutorial/install.md)
+
 
 ### 5. 规约性检查
   该阶段不关注模型的效果，只关注模型的结构是否和底层硬件相适配，功能实现贯穿了1~4步
