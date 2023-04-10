@@ -39,7 +39,7 @@ AI算法落地基本涵盖六个阶段：模型规约性检查、浮点训练、
 我们先假设模型结构与底层硬件完全适配，介绍流程中各个阶段，再介绍模型规约性检查的具体实现（实际开发过程中规约性检查要在模型结构初步进行，避免后续工作返工）。
 ### 1. 浮点训练
   我们基于[pytorch-cifar100](https://github.com/weiaicunzai/pytorch-cifar100)来进行功能展示  
-  首先确保在当前环境下，浮点模型训练基于pytorch能够跑起来。 
+  首先确保在当前环境下（建议linger-env)，浮点模型训练基于pytorch能够跑起来。 
 ```Shell
 python train.py -net resnet50 -gpu
 ```
@@ -51,16 +51,17 @@ python train.py -net resnet50 -gpu
   使用linger的模型转换工具，将[模型转换成onnx计算图](https://github.com/LISTENAI/thinker/blob/main/thinker/docs/images/onnx_export.png)。
 
 ### 3. 模型分析和打包
-  使用thinker离线工具tpacker对步2生成的onnx计算图打包  
+  切换到thinker-env环境，使用thinker离线工具tpacker对步2生成的onnx计算图打包，这里我们以训练好的resnet18模型为例，进行打包
 ```Shell
-tpacker -g xx.onnx -d Ture -o model.bin
+tpacker -g demo/resnet18/resnet18-12-regular.onnx -d True -o demo/resnet18/model.bin
 ```
+这里使用到的资源可以从[thinker/demo/resnet18](https://github.com/LISTENAI/thinker/demo/resnet18)中获取
 
 ### 4. 推理执行
   使用调用示例工程test_thinker，指定输入数据、资源文件和输出文件名称即可运行模拟代码。  
 ```Shell
 chmod +x ./bin/test_thinker
-./bin/test_thinker input.bin model.bin output.bin 3 32 32
+./bin/test_thinker demo/resnet18/input.bin demo/resnet18/model.bin demo/resnet18/output.bin 3 32 32 6
 ```
 
 ### 5. 规约性检查

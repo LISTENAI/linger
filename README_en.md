@@ -54,15 +54,16 @@ Use linger's model conversion tool to [convert the model into an onnx calculatio
 ### 3. Model analysis and packaging
 Use the thinker offline tool tpacker to pack the onnx calculation graph generated in step 2   
 ```Shell
-tpacker -g xx.onnx -d Ture -o model.bin
+tpacker -g demo/resnet28/resnet18-12-regular.onnx -d Ture -o demo/resnet28/model.bin
 ```
-
+we  can acquire resource from [thinker/demo/resnet18](https://github.com/LISTENAI/thinker/demo/resnet18/)
 ### 4. Engine Execution
 Use the sample project test_thinker to run the simulation code by specifying the input data, resource file and output file name.  
 ```Shell
 chmod +x ./bin/test_thinker
-./bin/test_thinker input.bin model.bin output.bin 3 32 32
+./bin/test_thinker demo/resnet28/input.bin demo/resnet28/model.bin demo/resnet28/output.bin 3 32 32 6
 ```
+Simplify the overall processing process here, with the engine input being a normalized 3x32x32 image and the output taking max_ The ID corresponding to value is used as the classification result. The processing of input images can refer to the [Image Processing Script](tools/image_process.py), or the processed test set images can be taken from Pytorch cifar100 for testing.
 
 ### 5. Conventional check
 At this stage, we do not pay attention to the effect of the model, but only pay attention to whether the structure of the model is compatible with the underlying hardware, and the function realization runs through steps 1~4
