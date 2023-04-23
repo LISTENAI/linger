@@ -72,12 +72,12 @@ $ sudo systemctl start docker # systemctl 命令的用法
 3、拉取镜像并加载  
 1）、拉取镜像
 ```shell
-docker pull listenai/linger-thinker:1.0.0
+docker pull listenai/linger:1.0.0
 ```
 
 2）、运行容器
 ```shell
-docker container run -it listenai/linger-thinker:1.0.0 /bin/bash
+docker container run -it listenai/linger:1.0.0 /bin/bash
 ```
 
 如果一切正常，运行上面的命令以后，就会返回一个命令行提示符。
