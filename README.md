@@ -55,7 +55,7 @@ python train.py -net resnet50 -gpu
 ```Shell
 tpacker -g demo/resnet18/resnet18-12-regular.onnx -d True -o demo/resnet18/model.bin
 ```
-这里使用到的资源可以从[thinker/demo/resnet18](https://github.com/LISTENAI/thinker/demo/resnet18)中获取
+这里使用到的资源可以从[thinker/demo/resnet18](https://github.com/LISTENAI/thinker/tree/main/demo/resnet18)中获取
 
 ### 4. 推理执行
   使用调用示例工程test_thinker，指定输入数据、资源文件和输出文件名称即可运行模拟代码。  
