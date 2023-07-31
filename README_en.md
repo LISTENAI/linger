@@ -94,6 +94,9 @@ So far, the model compliance check has been completed, ensuring that the model c
 - [PyTorch](https://github.com/pytorch/pytorch)
 - [ONNX](https://github.com/onnx/onnx)
 - [pytorch-cifar100](https://github.com/weiaicunzai/pytorch-cifar100)
-
+- 
+## Applications
+* snoring detect[https://github.com/mywang44/snoring_net]
+  
 ## License
 - linger is provided by the [Apache-2.0 license](LICENSE)
