@@ -90,6 +90,9 @@ chmod +x ./bin/test_thinker
 - [PyTorch](https://github.com/pytorch/pytorch)
 - [ONNX](https://github.com/onnx/onnx)
 - [pytorch-cifar100](https://github.com/weiaicunzai/pytorch-cifar100)
-
+- 
+## 应用示例
+* 鼾声检测[https://github.com/mywang44/snoring_net]
+  
 ## 版权和许可证
 - linger 由 [Apache-2.0 license](LICENSE) 提供
