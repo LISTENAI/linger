@@ -29,7 +29,7 @@ class NormalizeLinear(nn.Linear):
                 normalized_bias, self.normalize_bias, self.training)
         out = F.linear(input, normalized_weight, normalized_bias)
         if self.normalize_data:
-            out = NormalizeFunction.apply(out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self):

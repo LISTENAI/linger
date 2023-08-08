@@ -388,8 +388,7 @@ class NormalizeFastLSTM(nn.LSTM):
                                                         weight_ih_bi, weight_hh_bi, bias_B_bi)
 
             if self.normalize_data is not None:
-                output = NormalizeFunction.apply(
-                    output, self.normalize_data, self.training, False)
+                output.clamp_(-self.normalize_data, self.normalize_data)
 
             if isinstance(orig_input, tuple):
                 return (output, lengths), (hy, cy)

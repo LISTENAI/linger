@@ -1,7 +1,8 @@
 import torch
 import torch.nn
 
-from .modules import NormalizeConvBN1d, NormalizeConvBN2d
+from torch.nn.modules.conv import ConvTranspose2d
+from .modules import NormalizeConvBN1d, NormalizeConvBN2d, NormalizeConvTransposeBN2d
 from .ops.ops_names import LINGER_AHEAD_RELU, LINGER_AHEAD_SIGMOID, LINGER_IGNORE_PAMAMTER
 from .utils import Singleton, get_device
 
@@ -106,6 +107,12 @@ class SingletonConvFusedBnModules(Singleton):
                                                        padding=conv_m.padding, dilation=conv_m.dilation, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
                                                        eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
                                                        normalize_data=None, normalize_weight=None, normalize_bias=None, ahead_relu=ahead_relu)
+                    elif type(conv_m) == torch.nn.ConvTranspose2d:
+                         clamp_conv = NormalizeConvTransposeBN2d(in_channels= conv_m.in_channels,
+                                         out_channels= conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride, output_padding=conv_m.output_padding,
+                                         padding=conv_m.padding, dilation=conv_m.dilation,groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
+                                         eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
+                                         normalize_data=None, normalize_weight=None, normalize_bias=None,ahead_relu = ahead_relu)
                     clamp_conv = clamp_conv.to(device)
                     setattr(find_fused_info.conv_f, node_name, clamp_conv)
                 else:
@@ -380,8 +387,8 @@ def FuseConvBNAheadRelu(model, *args, fused_bn=True, ahead_conv_relu=True, ahead
                 model, conv.scope)
             bn_module_father, bn_module, bn_module_name = scope_to_module(
                 model, bn.scope)
-            if (type(conv_module) == torch.nn.Conv2d and type(bn_module) == torch.nn.BatchNorm2d) or \
-                    (type(conv_module) == torch.nn.Conv1d and type(bn_module) == torch.nn.BatchNorm1d):
+            if (type(conv_module) in (torch.nn.Conv2d, torch.nn.ConvTranspose2d) and type(bn_module) == torch.nn.BatchNorm2d) or \
+                    (type(conv_module) in (torch.nn.Conv1d, ) and type(bn_module) == torch.nn.BatchNorm1d):
                 fuseableconv_bn = FuseableConvBN(
                     conv_module_father, conv_module, bn_module_father, bn_module)
                 SingletonConvFusedBnModules()._register(fuseableconv_bn)

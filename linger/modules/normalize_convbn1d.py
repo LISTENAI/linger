@@ -93,7 +93,7 @@ class NormalizeConvBN1d(nn.Module):
             out = F.conv1d(input, new_weight, new_bias, self.conv.stride,
                               self.conv.padding, self.conv.dilation, self.conv.groups)
         if self.normalize_data is not None:
-            out = NormalizeFunction.apply(out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self):

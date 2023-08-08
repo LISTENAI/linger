@@ -13,7 +13,7 @@ def test_iqmul_iqtensor_scalar():
 
         def forward(self, x):
             x = self.fc(x)
-            x = x * 0.125
+            x = x * 0.16551
             return x
 
     model = iqTestLayer().cuda()
@@ -27,7 +27,7 @@ def test_iqmul_iqtensor_scalar():
     model.eval()
 
     with torch.no_grad():
-        torch.onnx.export(model, (x),"./data.ignore/iqmul.onnx",export_params=True,opset_version=11,operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK)
+        torch.onnx.export(model, (x),"iqmul.onnx",export_params=True,opset_version=11,operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK)
 
 def test_iqmul_scale_x_y_o():
     
@@ -50,4 +50,5 @@ def test_iqmul_scale_x_y_o():
     model.eval()
 
     with torch.no_grad():
-        torch.onnx.export(model, (a),"./data.ignore/iqmul.onnx",export_params=True,opset_version=11,operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK)
+        torch.onnx.export(model, (a),"iqmul.onnx",export_params=True,opset_version=11,operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK)
+        

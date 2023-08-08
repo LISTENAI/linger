@@ -45,8 +45,7 @@ class NormalizeBatchNorm2d(nn.BatchNorm2d):
                 beta, self.normalize_bias, self.training)
         out = alpha * input + beta
         if self.normalize_data is not None:
-            out = NormalizeFunction.apply(
-                out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self) -> str:

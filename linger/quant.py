@@ -38,8 +38,7 @@ class Quant():
                     scale_local = math.pow(2, bits)
                 else:
                     max_abs = torch.max(-min_x, max_x)
-                    max_value = round(
-                        math.log((bound_value+zero_point) / max_abs, 2))
+                    max_value = math.floor(math.log((bound_value+zero_point) / max_abs, 2))
                     scale_local = math.pow(2, max_value)
                     max_abs = (bound_value+zero_point) / scale_local
         else:

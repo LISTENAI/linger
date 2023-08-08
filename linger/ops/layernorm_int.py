@@ -70,15 +70,15 @@ class LayerNormFunction(torch.autograd.Function):
             sum_x = q_input.clone().sum(w_shape, keepdim=True)
             sum_x2 = q_input.clone().pow(2).sum(w_shape, keepdim=True)
             denominator = N * sum_x2 - sum_x * sum_x
-            denominator = denominator.contiguous().int()
-            denominator, deno_scale= lingerext.luna_layernormint(denominator.contiguous(), math.log2(scale_x.data))
-            deno_scale_f = torch.pow(2, deno_scale.float())
+            scale_eps = int(math.log2(scale_x.data)) * 2
+            q_eps = math.floor(eps * pow(2, scale_eps) * N * N + 0.5)
+            denominator = denominator + q_eps
             q_x_normal = q_input * N
             q_x_normal = q_x_normal - sum_x
-            q_x_normal = q_x_normal * denominator
-            q_x_normal = (q_x_normal * deno_scale_f + 0.5).floor().int()
+            q_x_normal = lingerext.luna_layernormint(q_x_normal.contiguous().int(), denominator.contiguous().long(), math.log2(scale_x.data))
+            q_x_normal = q_x_normal.contiguous().int()
             q_x_normal.clamp_(-2**15, 2**15-1)
-            eval_scale_normal.fill_(2**12)
+            eval_scale_normal.fill_(2**10)
 
             q_weights, scale_w, max_value_w = quant.quant(
                 weights, parameter_bits, mode=mode, quant_data='weight')
@@ -87,7 +87,7 @@ class LayerNormFunction(torch.autograd.Function):
             q_outputs = q_x_normal * q_weights
 
             if config.PlatFormQuant.platform_quant in (PlatFormQuant.luna_quant,):
-                q_bias = (bias * scale_w * eval_scale_normal + 0.5).floor()
+                q_bias = (bias * scale_w * eval_scale_normal + 0.5).floor().long()
                 q_bias.clamp_(-2**31, 2**31-1)
                 q_outputs = q_outputs + q_bias
                 q_outputs.clamp_(-2**31, 2**31-1)
@@ -110,7 +110,7 @@ class LayerNormFunction(torch.autograd.Function):
 
         else:
             assert running_x > 0, 'invalid running_x <= 0, please finetune training before eval'
-            eval_scale_normal.fill_(2**12)
+            eval_scale_normal.fill_(2**10)
             if weights.dtype == torch.float32:
                 scale_x = ScalerBuffer(quant.running_to_scale(
                     running_x, data_bits, mode=mode))
@@ -125,9 +125,9 @@ class LayerNormFunction(torch.autograd.Function):
                 q_bias = None
                 if config.PlatFormQuant.platform_quant in (PlatFormQuant.luna_quant,):
                     if bias.dtype == torch.float32:
-                        q_bias = (bias * scale_w * eval_scale_normal + 0.5).floor()
+                        q_bias = (bias * scale_w * eval_scale_normal + 0.5).floor().long()
                     else:
-                        q_bias = bias.contiguous()                    
+                        q_bias = bias.contiguous().long()
                 else:
                     assert False, 'linger only support luna quant.'
             else:
@@ -135,8 +135,8 @@ class LayerNormFunction(torch.autograd.Function):
                 scale_normal = eval_scale_normal
                 scale_w = eval_scale_w
                 scale_o = eval_scale_o
-                q_weights = weights.contiguous()
-                q_bias = bias.contiguous()
+                q_weights = weights.contiguous().int()
+                q_bias = bias.contiguous().long()
             q_bias.clamp_(-2**31, 2**31-1)
             if isinstance(input, IQTensor):
                 scale_x = eval_scale_x
@@ -146,29 +146,25 @@ class LayerNormFunction(torch.autograd.Function):
                 q_input, _, _ = quant.quant(
                     input.data, data_bits, scale_x, mode=mode, quant_data='input')
             q_input = q_input.contiguous().int()
-            q_weights = q_weights.contiguous().int()
+            q_weights = q_weights.contiguous().int()            
             sum_x = q_input.clone().sum(w_shape, keepdim=True)
             sum_x2 = q_input.clone().pow(2).sum(w_shape, keepdim=True)
             denominator = N * sum_x2 - sum_x * sum_x
-            denominator = denominator.contiguous().int()
-            denominator, deno_scale= lingerext.luna_layernormint(denominator.contiguous(), math.log2(scale_x.data))
-            deno_scale_f = torch.pow(2, deno_scale.float())
+            scale_eps = int(math.log2(scale_x.data)) * 2
+            q_eps = math.floor(eps * pow(2, scale_eps) * N * N + 0.5)
+            denominator = denominator + q_eps
             q_x_normal = q_input * N
             q_x_normal = q_x_normal - sum_x
-            q_x_normal = q_x_normal * denominator
-            q_x_normal = (q_x_normal * deno_scale_f + 0.5).floor().int()
+            q_x_normal = lingerext.luna_layernormint(q_x_normal.contiguous().int(), denominator.contiguous().long(), math.log2(scale_x.data))
+            q_x_normal = q_x_normal.contiguous().int()
             q_x_normal.clamp_(-2**15, 2**15-1)
             q_outputs = q_x_normal * q_weights + q_bias
             q_outputs.clamp_(-2**31, 2**31-1)
-            outputs = quant.dequant(q_outputs, eval_scale_normal * scale_w)
-
-            if o_bits is not None:
-                if config.PlatFormQuant.platform_quant == PlatFormQuant.luna_quant:
-                    q_outputs, _, _ = quant.quant(
-                        outputs, o_bits, scale_o, mode=mode, quant_data='output')
-                else:
-                    assert False, "linger only support luna quant."
-                outputs = quant.dequant(q_outputs, scale_o)
+            q_outputs = q_outputs.contiguous().double()
+            q_outputs = (q_outputs * scale_o() / (eval_scale_normal() * scale_w()) + 0.5).floor()
+            q_outputs = q_outputs.contiguous().int()
+            q_outputs.clamp_(-128, 127)
+            outputs = quant.dequant(q_outputs, scale_o)
 
             if dump:
                 name_list = ["input", "weights", "bias", "q_weights",  "q_input", "q_input_normal", "denominator", "q_bias", "q_outputs",
@@ -362,9 +358,7 @@ class LayerNormInt(nn.LayerNorm, ModuleIntConfig):
                 scale_x = ScalerBuffer(module.quant.running_to_scale(ScalerBuffer(
                     module._buffers['running_x']), module.data_bits, mode=module.quant_mode))
                 module._buffers['scale_x'].data.fill_(scale_x())
-            # scale_normal = ScalerBuffer(module.quant.running_to_scale(ScalerBuffer(
-            #     module._buffers['running_normal']), module.data_bits, mode=module.quant_mode))
-            scale_normal.fill_(2**12)
+            scale_normal.fill_(2**10)
             module._buffers['scale_normal'].data.fill_(scale_normal())
             if module.o_bits is not None:
                 scale_o = ScalerBuffer(module.quant.running_to_scale(ScalerBuffer(
@@ -431,7 +425,7 @@ class LayerNormInt(nn.LayerNorm, ModuleIntConfig):
     def _load_from_state_dict(module, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
         allow_missing_keys = ['running_w', 'running_x', 'running_normal', 'running_o',
-                              'scale_x', 'running_normal', 'scale_w', 'scale_o']
+                              'scale_x', 'running_normal', 'scale_w', 'scale_o', 'scale_normal']
         local_missing_keys = []
         module._load_from_state_dict_global_(state_dict, prefix, local_metadata, strict,
                                              local_missing_keys, unexpected_keys, error_msgs)

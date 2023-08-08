@@ -425,7 +425,8 @@ class iqMul(torch.autograd.Function):
     @staticmethod
     def symbolic(g, x, y, c_y, scale_x, scale_y, zero_x, zero_y, local_scale_o, scale_o, running_o, training, quant_mode, prefix, dump, path):
         if c_y is not None:
-            c_y = c_y * scale_y()
+            c_y = math.floor(c_y * scale_y() + 0.5)
+            c_y = max(-128, min(127, c_y))
             y = g.op("Constant", value_t=torch.tensor(c_y, dtype=torch.int8))
         input_list = [x, y]
         platform_quant = platform_to_string(
@@ -460,7 +461,7 @@ class iqMulLayer(torch.nn.Module):
             local_scale_o(float):本batch的scale值
             quant_mode(QuantMode):输出z的量化方法，目前仅支持Q值量化
         returns:
-            加法结果z 类型为IQTensor 
+            乘法结果z 类型为IQTensor 
 
         """
         scale_x = ScalerBuffer(x.scale_data)
@@ -468,19 +469,25 @@ class iqMulLayer(torch.nn.Module):
         if not isinstance(y, torch.Tensor):
             c_y = y
             self.is_y_constant = True
-            if 0 < y < 1:
-                y_ = math.log(y, 2)
-                if y_ % 1 != 0:
-                    assert False, f"in iqmul, input y must equals to 2**a, where a is integer, but you have y = {y}"
-                y = torch.tensor(y, dtype=torch.float32, device=x.device)
-                y = from_torch_tensor(y, 2**(-y_), 8)
-            elif y >= 1:
-                if y & (y-1) != 0:
-                    assert False, f"in iqmul, input y must equals to 2**a, where a is integer, but you have y = {y}"
-                y = torch.tensor(y, dtype=torch.float32, device=x.device)
-                y = from_torch_tensor(y, 1, 8)
-            else:
-                assert False, f"in iqmul, input y must lager than 0, and equals to 2**a, where a is integer, but you have y = {y}"
+            y = torch.tensor(y, dtype=torch.float32, device=x.device)
+            q_y, scale_y, _ = Quant.quant(
+                y, 8, mode=quant_mode, quant_data='input')
+            y = Quant.dequant(q_y, scale_y)
+            y = from_torch_tensor(y, scale_y(), 8)
+
+            # if 0 < y < 1:
+            #     y_ = math.log(y, 2)
+            #     if y_ % 1 != 0:
+            #         assert False, f"in iqmul, input y must equals to 2**a, where a is integer, but you have y = {y}"
+            #     y = torch.tensor(y, dtype=torch.float32, device=x.device)
+            #     y = from_torch_tensor(y, 2**(-y_), 8)
+            # elif y >= 1:
+            #     if y & (y-1) != 0:
+            #         assert False, f"in iqmul, input y must equals to 2**a, where a is integer, but you have y = {y}"
+            #     y = torch.tensor(y, dtype=torch.float32, device=x.device)
+            #     y = from_torch_tensor(y, 1, 8)
+            # else:
+            #     assert False, f"in iqmul, input y must lager than 0, and equals to 2**a, where a is integer, but you have y = {y}"
 
         scale_y = ScalerBuffer(y.scale_data)
         scale_o = ScalerBuffer(self.scale_o)
@@ -799,7 +806,11 @@ class iqAdd(torch.autograd.Function):
                 scale_z_iq = math.pow(2, scale_log)
             else:
                 scale_z_iq = np.float32((math.pow(2, 8-1)-1) / running_o.data)
-            scale_z_iq = ScalerBuffer(scale_z_iq)
+            min_scale_in = min(scale_x(), scale_y())
+            if scale_z_iq > min_scale_in:
+                scale_z_iq = ScalerBuffer(min_scale_in)
+            else:
+                scale_z_iq = ScalerBuffer(scale_z_iq)
             scale_o.fill_(scale_z_iq())
         if (x_int.size() != y_int.size()):
             x_int, y_int = torch.broadcast_tensors(x_int, y_int)
@@ -1069,6 +1080,8 @@ class iqSum(torch.autograd.Function):
             config.PlatFormQuant.platform_quant)
         param_dict = {'scale_x_f': scale_x(), 'scale_o_f': scale_o(),
                       'platform_quant_s': platform_quant}
+        if len(args) == 1:
+            param_dict['dims_i'] = args[0]
 
         return g.op("thinker::iqSum", *input_list, **param_dict)
 

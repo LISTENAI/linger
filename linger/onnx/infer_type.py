@@ -728,7 +728,7 @@ class ArgMax(OpBase):
     def infer_type(self, in_type):
         tensor_type_map = {}
         # corresponding with 1.7 onnxruntime doc
-        assert in_type[0] in [1, 6, 10, 11]
+        assert in_type[0] in [1, 3, 6, 10, 11]
         for output in self.node.output:
             tensor_type_map[output] = in_type[0]
         return tensor_type_map

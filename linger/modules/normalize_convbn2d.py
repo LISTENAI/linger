@@ -95,7 +95,7 @@ class NormalizeConvBN2d(nn.Module):
                               self.conv.padding, self.conv.dilation, self.conv.groups)
 
         if self.normalize_data is not None:
-            out = NormalizeFunction.apply(out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self):

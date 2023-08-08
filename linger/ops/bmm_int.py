@@ -31,7 +31,7 @@ class BmmIntFunction(torch.autograd.Function):
                 input, IQTensor) else 0
             is_iq_tensor_x = True if isinstance(input, IQTensor) else False
             zero_point_y = mat2.zero_point if isinstance(
-                input, IQTensor) else 0
+                mat2, IQTensor) else 0
             is_iq_tensor_y = True if isinstance(mat2, IQTensor) else False
             ctx.value = zero_point_x, is_iq_tensor_x, zero_point_y, is_iq_tensor_y
             if isinstance(input, IQTensor):

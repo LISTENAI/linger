@@ -13,14 +13,16 @@ class NormalizeLayerNorm(nn.LayerNorm):
         assert normalize_weight is None or normalize_weight > 0, 'normalize value is None or must >0'
         assert normalize_bias is None or normalize_bias > 0, 'normalize value is None or must >0'
         nn.LayerNorm.__init__(self, normalized_shape, eps, elementwise_affine)
+        self.normalized_shape = normalized_shape
         self.normalize_data = normalize_data
         self.normalize_weight = normalize_weight
         self.normalize_bias = normalize_bias
         self.ahead_relu = ahead_relu
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        H, W = input.shape[-2], input.shape[-1]
-        size = H * W
+        size = 1
+        for dim_size in self.normalized_shape:
+            size *= dim_size
         if len(self.weight.shape) == 1:
             w_shape = (-1)
         elif len(self.weight.shape) == 2:
@@ -48,8 +50,7 @@ class NormalizeLayerNorm(nn.LayerNorm):
                 normalized_bias, self.normalize_bias, self.training)
         out = normalized_weight * x_normal + normalized_bias
         if self.normalize_data is not None:
-            out = NormalizeFunction.apply(
-                out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self) -> str:

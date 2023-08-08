@@ -102,6 +102,40 @@ def fuse_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, un
         assert clamp_conv_name + '.weight' not in state_dict and clamp_bn_name + \
             '.weight' not in state_dict, 'load quanted model but contain float clamp params'
 
+def fuse_state_dict_deconv(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+
+    eps = 1e-5
+    clamp_conv_name = prefix + 'conv'
+    clamp_bn_name = prefix + 'bn'
+    conv_int_name = prefix
+    if clamp_conv_name + '.weight' in state_dict and clamp_bn_name + '.weight' in state_dict:
+        b_mean = state_dict[clamp_bn_name + '.running_mean']
+        b_var = state_dict[clamp_bn_name + '.running_var']
+        b_w = state_dict[clamp_bn_name + '.weight']
+        b_b = state_dict[clamp_bn_name + '.bias']
+        sigma = 1 / torch.sqrt(b_var + eps)
+        alpha = b_w * sigma
+        beta = b_b - b_mean * alpha
+        c_w = state_dict[clamp_conv_name + '.weight']
+        cin, cout_div_groups, *hw = c_w.shape
+        groups = b_b.shape[0] //  cout_div_groups
+        conv_weight = c_w.view(groups, cin // groups, cout_div_groups, *hw )
+        new_weight = conv_weight.mul(alpha.view(groups, 1, -1, *([1]*(len(c_w.shape)-2)))).view(cin, cout_div_groups, *hw)
+        state_dict[conv_int_name + 'weight'] = new_weight
+        if clamp_conv_name + '.bias' in state_dict:
+            c_b = state_dict[clamp_conv_name + '.bias']
+            state_dict[conv_int_name + 'bias'] = (c_b * alpha + beta)
+            state_dict.pop(clamp_conv_name + '.bias')
+        else:
+            state_dict[conv_int_name + 'bias'] = beta
+        state_dict.pop(clamp_bn_name + '.running_mean')
+        state_dict.pop(clamp_bn_name + '.running_var')
+        state_dict.pop(clamp_bn_name + '.weight')
+        state_dict.pop(clamp_bn_name + '.bias')
+        state_dict.pop(clamp_bn_name + '.num_batches_tracked')
+        state_dict.pop(clamp_conv_name + '.weight')
+    else:
+        assert clamp_conv_name + '.weight' not in state_dict and clamp_bn_name + '.weight' not in state_dict, 'load quanted model but contain float clamp params'
 
 def _replaceOp(submodule, mode, in_data_bits, parameter_bits, out_bits=None):
     assert in_data_bits > 0 and in_data_bits <= 32, "in_data_bits should between 0 and 32"
@@ -132,6 +166,13 @@ def _replaceOp(submodule, mode, in_data_bits, parameter_bits, out_bits=None):
                              True, submodule.conv.padding, data_bits=in_data_bits, parameter_bits=parameter_bits, o_bits=out_bits, mode=mode,
                              clamp_data=submodule.normalize_data, clamp_weight=submodule.normalize_weight, clamp_bias=submodule.normalize_bias, ahead_relu=submodule.ahead_relu)
             conv._register_load_state_dict_pre_hook(fuse_state_dict)
+            return conv
+        elif isinstance(submodule, NormalizeConvTransposeBN2d):
+            # ahead_relu = getattr(submodule,IFLYTEK_BITBRAIN_AHEAD_RELU,False)
+            conv = ConvTranspose2dInt(submodule.conv.in_channels, submodule.conv.out_channels, submodule.conv.kernel_size, submodule.conv.stride, submodule.conv.padding, submodule.conv.output_padding, submodule.conv.groups,
+                True, submodule.conv.dilation, submodule.conv.padding_mode, data_bits= in_data_bits,parameter_bits=parameter_bits,mode=mode,o_bits=out_bits,  
+                clamp_data=submodule.normalize_data, clamp_weight=submodule.normalize_weight, clamp_bias=submodule.normalize_bias)
+            conv._register_load_state_dict_pre_hook(fuse_state_dict_deconv)
             return conv
         elif isinstance(submodule, NormalizeConv1d):
             bias = True if submodule.bias is not None else False
@@ -174,7 +215,8 @@ def _replaceOp(submodule, mode, in_data_bits, parameter_bits, out_bits=None):
             ahead_relu = getattr(submodule, LINGER_AHEAD_RELU, False)
             submodule_momentum = 0.1
             layer_norm = LayerNormInt(submodule.normalized_shape, submodule.eps, submodule_momentum, submodule.elementwise_affine,
-                                      data_bits=in_data_bits, parameter_bits=parameter_bits, mode=mode, o_bits=out_bits, ahead_relu=ahead_relu)
+                                      data_bits=in_data_bits, parameter_bits=parameter_bits, mode=mode, o_bits=out_bits, 
+                                      clamp_data=submodule.normalize_data, clamp_weight=submodule.normalize_weight, clamp_bias=submodule.normalize_bias, ahead_relu=ahead_relu)
             return layer_norm
         elif isinstance(submodule, NormalizeEmbedding):
             embedding = EmbeddingInt(submodule.num_embeddings, submodule.embedding_dim, submodule.padding_idx, submodule.max_norm, submodule.norm_type, submodule.scale_grad_by_freq, submodule.sparse,
@@ -437,7 +479,7 @@ def init(model: nn.Module, *, quant_modules: Tuple = DefaultQuantIntXOP, paramet
     assert out_bits is None or out_bits > 0 and out_bits <= 32, "out_bits should between 0 and 32"
     if type(quant_modules) is not tuple:
         quant_modules = (quant_modules,)
-    quant_modules = set(list(quant_modules) + [NormalizeConvBN1d, NormalizeConvBN2d, NormalizeConv2d, NormalizeConv1d, NormalizeConvTranspose2d,
+    quant_modules = set(list(quant_modules) + [NormalizeConvBN1d, NormalizeConvBN2d, NormalizeConvTransposeBN2d, NormalizeConv2d, NormalizeConv1d, NormalizeConvTranspose2d,
                         NormalizeLinear, nn.ReLU6, NormalizeFastGRU, NormalizeFastLSTM, NormalizeBatchNorm2d, NormalizeEmbedding, NormalizeLayerNorm])
     for user_module_type in quant_modules:
         assert user_module_type in SupportQuantTorchModules, 'currently not support quant of ' + \

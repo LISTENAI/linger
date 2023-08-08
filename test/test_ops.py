@@ -8,6 +8,7 @@ from linger.ops import *
 def test_linear():
     torch.manual_seed(1)
     torch.cuda.manual_seed(1)
+    torch.cuda.set_device(2)
     origin_fc = nn.Linear(50, 100, True).cuda().train()
     linger.SetPlatFormQuant(platform_quant=linger.PlatFormQuant.luna_quant)
     my_fc = LinearInt(50, 100, True, data_bits=8,
@@ -94,6 +95,7 @@ class bn_(nn.Module):
 def test_convtranspose():
     torch.manual_seed(1)
     torch.cuda.manual_seed(1)
+    torch.cuda.set_device(2)
     origin_convtranspose = nn.ConvTranspose2d(
         10, 10, 5, 5, 2, 4, 2, True, 2).cuda().train()
     my_convtranspose = ConvTranspose2dInt(
@@ -110,7 +112,7 @@ def test_convtranspose():
         output2 = my_convtranspose(input1)
         criterion = nn.MSELoss()
         optimizer = torch.optim.SGD(origin_convtranspose.parameters(), lr=0.01)
-        target = torch.ones(10, 10, 254, 254, requires_grad=True).cuda()
+        target = torch.ones(10, 10, 254, 254, requires_grad=True).cuda(2)
         loss = criterion(output1, target)
         optimizer.zero_grad()
         loss.backward()
@@ -129,6 +131,7 @@ def test_convtranspose():
 def test_batchnorm():
     torch.manual_seed(1)
     torch.cuda.manual_seed(1)
+    torch.cuda.set_device(2)
     origin_bn = nn.BatchNorm2d(10, eps=1e-5, momentum=0.1).cuda().train()
     my_bn = BatchNormInt(10, eps=1e-5, momentum=0.1, o_bits=8,
                          data_bits=8, parameter_bits=8).cuda().train()
@@ -162,6 +165,7 @@ def test_batchnorm():
 def test_gru():
     torch.manual_seed(1)
     torch.cuda.manual_seed(1)
+    torch.cuda.set_device(2)
     origin_gru = nn.GRU(10, 20, batch_first=True,
                         bidirectional=True).cuda().train()
     my_gru = GRUInt(10, 20, batch_first=True,
@@ -205,6 +209,7 @@ def test_gru():
 def test_lstm():
     torch.manual_seed(1)
     torch.cuda.manual_seed(1)
+    torch.cuda.set_device(2)
     origin_lstm = nn.LSTM(10, 20, batch_first=True,
                           bidirectional=True).cuda().train()
     my_lstm = LSTMInt(10, 20, batch_first=True,

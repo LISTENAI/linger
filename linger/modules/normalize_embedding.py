@@ -31,12 +31,12 @@ class NormalizeEmbedding(nn.Embedding):
                         self.norm_type, self.scale_grad_by_freq, self.sparse)
 
         if self.normalize_data is not None:
-            out = NormalizeFunction.apply(out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self):
         s = nn.Embedding.extra_repr(self)
-        extra_s = ',normalize_data:{normalize_data},normalize_weight:{normalize_weight}}'.format(
+        extra_s = ',normalize_data:{normalize_data},normalize_weight:{normalize_weight}'.format(
             **self.__dict__)
         return s+extra_s
 

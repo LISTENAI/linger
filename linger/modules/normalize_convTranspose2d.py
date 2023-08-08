@@ -69,8 +69,7 @@ class NormalizeConvTranspose2d(nn.ConvTranspose2d):
             input, normalized_weight, normalized_bias, self.stride, self.padding,
             self.output_padding, self.groups, self.dilation)
         if self.normalize_data is not None:
-            out = NormalizeFunction.apply(
-                out, self.normalize_data, self.training, False)
+            out.clamp_(-self.normalize_data, self.normalize_data)
         return out
 
     def extra_repr(self):

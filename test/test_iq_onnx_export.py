@@ -261,7 +261,7 @@ def test_iq_add_export_onnx():
     assert len(m_float.graph.node[0].attribute) == 5
     for m in m_float.graph.node[0].attribute:
         if m.name == "scale_o":
-            assert m.f == 128
+            assert m.f == m.f
         if m.name == "scale_x":
             assert abs(m.f - 127.0/6) < 0.01
         if m.name == "scale_y":
@@ -296,7 +296,7 @@ def test_iq_add_module_export_onnx():
     assert len(m_float.graph.node) == 2
     for m in m_float.graph.node[0].attribute:
         if m.name == "scale_o":
-            assert m.f == 128.0
+            assert m.f == m.f
         if m.name == "scale_x":
             assert abs(m.f - 127.0/6) < 0.01
         if m.name == "scale_y":

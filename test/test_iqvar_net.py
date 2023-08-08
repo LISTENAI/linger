@@ -49,5 +49,5 @@ def test_var():
         optimizer.step()
 
     with torch.no_grad():
-        torch.onnx.export(model, dummy_input, "./data.ignore/var.onnx", export_params=True, opset_version=11,
+        torch.onnx.export(model, dummy_input, "var.onnx", export_params=True, opset_version=11,
                           operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK)

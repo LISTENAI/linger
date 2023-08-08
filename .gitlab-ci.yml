@@ -1,0 +1,29 @@
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+
+build job:
+  stage: build
+  script:
+    - echo $CI_PROJECT_PATH
+    - echo $CI_PROJECT_DIR
+    - echo $CI_COMMIT_TITLE
+    - echo $CI_CONFIG_PATH
+
+test job:
+  stage: test
+  script:
+    - ./auto_test.sh
+      
+
+deploy pages to artifacts:
+  stage: deploy
+  script:
+    - echo $HTML_REMOTE_DIR/$HTML_PATH
+  
+
+
+

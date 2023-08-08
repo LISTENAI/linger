@@ -1,9 +1,3 @@
-import os
-import sys
-
-cur_dir = os.path.abspath(os.path.dirname(__file__))
-sys.path.append(os.path.join(cur_dir, "lib"))
-
 from .__version import __version__, version_info
 from .config import *
 from .conv_bn_fuser import EmptyBatchNorm, FuseBNIntoConv, FuseConvBNAheadRelu
@@ -14,7 +8,7 @@ from .layer_normalizer import (disable_normalize, normalize_layers,
                                normalize_module)
 from .layer_tracer import trace_layers
 from .modules import (NormalizeBatchNorm2d, NormalizeConv1d, NormalizeConv2d,
-                      NormalizeConvBN1d, NormalizeConvBN2d,
+                      NormalizeConvBN1d, NormalizeConvBN2d, NormalizeConvTransposeBN2d,
                       NormalizeConvTranspose2d, NormalizeEmbedding,
                       NormalizeFastGRU, NormalizeFastLSTM, NormalizeLayerNorm,
                       NormalizeLinear)

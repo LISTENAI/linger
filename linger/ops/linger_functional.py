@@ -133,7 +133,7 @@ class iqRelu(torch.autograd.Function):
 def _constant_pad_nd(g, input, padding, value=None):
     mode = "constant"
     pad = _prepare_onnx_paddings(g, input.type().dim(), padding)
-    return g.op("Pad", input, pad, value, mode_s=mode)
+    return g.op("thinker::iqPad", input, pad, value, mode_s=mode)
 
 
 class iqPad(torch.autograd.Function):
@@ -405,9 +405,13 @@ class softmaxInt(torch.autograd.Function):
                 q_input, _, max_value_x = Quant().quant(input.data, data_bits, scale_x,
                                                            mode=QuantMode.QValue, quant_data='input', iq_zero_point=input.zero_point)
             else:
-                q_input, _, max_value_x = Quant().quant(
-                    input.data, data_bits, mode=mode, quant_data='input')
+                input_without_inf = input.clone()
+                input_inf_mask = (input_without_inf<=(-2**(data_bits - 1))) #float("-inf")
+                input_without_inf[input_without_inf<=(-2**(data_bits - 1))] = 0                
+                q_input, scale_x, max_value_x = Quant().quant(
+                    input_without_inf.data, data_bits, mode=mode, quant_data='input')
                 running_x.mul_(1-momentum).add_(momentum*max_value_x)
+                q_input[input_inf_mask] = -2**(data_bits * 2 - 1)
 
             if config.PlatFormQuant.platform_quant == PlatFormQuant.luna_quant:
                 n_dim = len(input.shape)
@@ -422,13 +426,14 @@ class softmaxInt(torch.autograd.Function):
 
                 l_scale = 25 - int(math.log2(scale_x.data))     # Q25 in
                 if l_scale > 0:
-                    x_int_shift = (x_shaped * pow(2, l_scale)).int()
+                    x_int_shift = (x_shaped * pow(2, l_scale)).long()
                 else:
                     x_int_shift = (
-                        x_shaped * pow(2, l_scale) + 0.5).floor().int()
+                        x_shaped * pow(2, l_scale) + 0.5).floor().long()
+                x_int_shift.clamp_(-2**31, 2**31-1)
 
                 q_output = lingerext.luna_softmax_int(
-                    x_int_shift.contiguous(), float(scale_x()))   # Q25->Q15
+                    x_int_shift.contiguous().int(), float(scale_x()))   # Q25->Q15
                 q_output.clamp_(0, 2**15-1)
                 q_output = q_output.reshape(x_ori.shape)
                 if dim != -1 and dim != n_dim - 1:
@@ -466,26 +471,25 @@ class softmaxInt(torch.autograd.Function):
 
                 l_scale = 25 - int(math.log2(scale_x.data))     # Q25 in
                 if l_scale > 0:
-                    x_int_shift = (x_shaped * pow(2, l_scale)).int()
+                    x_int_shift = (x_shaped * pow(2, l_scale)).long()
                 else:
                     x_int_shift = (
-                        x_shaped * pow(2, l_scale) + 0.5).floor().int()
+                        x_shaped * pow(2, l_scale) + 0.5).floor().long()
+                x_int_shift.clamp_(-2**31, 2**31-1)
 
                 q_output = lingerext.luna_softmax_int(
-                    x_int_shift.contiguous(), float(scale_x()))   # Q25->Q15
+                    x_int_shift.contiguous().int(), float(scale_x()))   # Q25->Q15
                 q_output.clamp_(0, 2**15-1)
                 q_output = q_output.reshape(x_ori.shape)
                 if dim != -1 and dim != n_dim - 1:
                     q_output = q_output.permute(*dims)
                 scale_local_o.fill_(2**15)
-                outputs = Quant().dequant(q_output, scale_local_o)  # Q15->float
+                q_output = (q_output * scale_o() / scale_local_o() + 0.5).floor()
+                q_output = q_output.contiguous().int()
+                q_output.clamp_(-128, 127)
+                outputs = Quant().dequant(q_output, scale_o)
             else:
                 assert False, 'platform_quant mode donot support for softmaxInt'
-
-            if o_bits is not None:
-                q_output, _, _ = Quant().quant(outputs, o_bits, scale_o,
-                                                  mode=mode, quant_data='output')
-                outputs = Quant().dequant(q_output, scale_o)
 
             if dump:
                 name_list = ['input',  'outputs', 'q_input',  'q_outputs']
@@ -614,27 +618,10 @@ class softmaxIntLayer(torch.nn.Module):
             self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
 
-def softmax(tensor, dim, dtype=None):
-    is_softmax_int = True
-    if not isinstance(tensor, IQTensor):
-        is_softmax_int = False
+def softmax(tensor, dim, _stacklevel=3, dtype=None):
+
     module_self = get_current_module()
-    if module_self is None:
-        is_softmax_int = False
-    if not is_softmax_int:
-        scale_o = 1
-        tensor.clamp_(-128, 127) 
-        min_x = torch.min(tensor)
-        max_x = torch.max(tensor)
-        if min_x == max_x == 0:
-            scale_o = math.pow(2, 8)
-        else:
-            max_abs = torch.max(-min_x, max_x)
-            max_value = round(math.log((127) / max_abs, 2))
-            scale_o = math.pow(2, max_value)
-        tensor = from_torch_tensor(tensor, scale_o, 8)
-        # return torch_softmax(tensor, dim=dim)
-    # assert tensor.bits == 8, 'softmaxInt only support 8bit'
+
     quant_mode = getattr(module_self, LINGER_MODE, QuantMode.QValue)
     iname_index = getattr(module_self, LINGER_IQTENSOR_LAYER_COUNTER)
     setattr(module_self, LINGER_IQTENSOR_LAYER_COUNTER, iname_index+1)
@@ -873,7 +860,7 @@ class logsoftmaxIntLayer(torch.nn.Module):
             self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
 
-def logsoftmax(tensor, dim, dtype=None):
+def logsoftmax(tensor, dim, _stacklevel=3, dtype=None):
     is_logsoftmax_int = True
     if not isinstance(tensor, IQTensor):
         is_logsoftmax_int = False

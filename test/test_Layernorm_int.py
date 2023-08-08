@@ -40,9 +40,9 @@ def notest_layernorm_int_net():
     torch.cuda.manual_seed_all(1)
     np.random.seed(1)
 
-    net = Net()#.cuda()
-    dummy_input = torch.randn(1, 1, 3, 3)#.cuda()
-    target = torch.ones(1, 100)#.cuda()
+    net = Net().cuda()
+    dummy_input = torch.randn(1, 1, 3, 3).cuda()
+    target = torch.ones(1, 100).cuda()
     criterion = nn.MSELoss()
     net.train()
     replace_tuple = (nn.Conv2d, nn.ConvTranspose2d, nn.Linear,

@@ -98,6 +98,15 @@ def _replaceModule(submodule, normalize_weight_value, normalize_bias_value, norm
                                        submodule.conv.groups, bias, submodule.conv.padding_mode, submodule.bn.eps, submodule_bn_momentum, submodule.bn.affine, submodule.bn.track_running_stats,
                                        normalize_data=normalize_output_value, normalize_weight=normalize_weight_value, normalize_bias=normalize_bias_value, ahead_relu=submodule.ahead_relu)
             return convbn
+        elif isinstance(submodule, NormalizeConvTransposeBN2d):
+            # ahead_add = getattr(submodule,IFLYTEK_BITBRAIN_AHEAD_ADD,False)
+            # submodule.ahead_add = ahead_add
+            submodule.normalize_data = normalize_output_value
+            submodule.normalize_weight = normalize_weight_value
+            submodule.normalize_bias = normalize_bias_value
+            if config.BnMomentumUpdate.disable:
+                submodule.bn.momentum = 0
+            return submodule
         elif isinstance(submodule, nn.Conv2d):
             bias = True if submodule.bias is not None else False
             ahead_relu = getattr(submodule, LINGER_AHEAD_RELU, False)
@@ -134,7 +143,11 @@ def _replaceModule(submodule, normalize_weight_value, normalize_bias_value, norm
             bn = NormalizeBatchNorm2d(submodule.num_features, eps=submodule.eps, momentum=submodule_momentum, affine=submodule.affine, track_running_stats=submodule.track_running_stats,
                                       normalize_data=normalize_output_value, normalize_weight=normalize_weight_value, normalize_bias=normalize_bias_value, ahead_relu=ahead_relu)
             return bn
-
+        elif isinstance(submodule, nn.LayerNorm):
+            ahead_relu = getattr(submodule, LINGER_AHEAD_RELU, False)
+            ln = NormalizeLayerNorm(submodule.normalized_shape, eps=submodule.eps, elementwise_affine=submodule.elementwise_affine, 
+                                    normalize_data=normalize_output_value, normalize_weight=normalize_weight_value, normalize_bias=normalize_bias_value, ahead_relu=ahead_relu)
+            return ln
         elif isinstance(submodule, nn.Conv1d):
             bias = True if submodule.bias is not None else False
             ahead_relu = getattr(submodule, LINGER_AHEAD_RELU, False)
@@ -161,7 +174,7 @@ def normalize_layers(model: nn.Module, *, normalize_modules: Tuple = DefaultNorm
     if type(normalize_modules) is not tuple:
         normalize_modules = (normalize_modules, )
     normalize_modules = set(list(normalize_modules) +
-                            [NormalizeConvBN2d, NormalizeConvBN1d])
+                            [NormalizeConvBN2d, NormalizeConvBN1d, NormalizeConvTransposeBN2d])
     for user_module_type in normalize_modules:
         assert user_module_type in SupportNormalizeTorchModules, 'Currently not support clamp of ' + \
             str(user_module_type)
