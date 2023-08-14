@@ -1,3 +1,9 @@
+import os
+import sys
+
+cur_dir = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(os.path.join(cur_dir, "lib"))
+
 from .__version import __version__, version_info
 from .config import *
 from .conv_bn_fuser import EmptyBatchNorm, FuseBNIntoConv, FuseConvBNAheadRelu
