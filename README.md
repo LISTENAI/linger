@@ -81,6 +81,9 @@ chmod +x ./bin/test_thinker
 - [安装出现问题解决](doc/tutorial/install_bugs.md)
 - [量化常见问题与注意事项](doc/tutorial/quant_faq.md)
 
+## 版本说明
+- 请参考[RELEASE](doc/tutorial/release.md)
+
 ## 交流与反馈
 - 欢迎您通过 Github Issues 来提交 BUG 与建议
 - 技术交流微信群  

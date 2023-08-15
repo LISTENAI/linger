@@ -81,6 +81,9 @@ So far, the model compliance check has been completed, ensuring that the model c
 - [Installation problem solving](doc/tutorial/install_bugs.md)
 - [Quantification of common problems and notes](doc/tutorial/quant_faq.md)
 
+## Release Not
+- Please refer to [RELEASE](doc/tutorial/release.md)
+
 ## Data Search
 - [linger API](doc/tutorial/linger_api.md)
 - [List of supported quantization OPs](doc/tutorial/support_quant_ops.md) and [their restrictions](https://github.com/LISTENAI/thinker/blob/main/thinker/docs/tutorial/restrain_of_model.md)
