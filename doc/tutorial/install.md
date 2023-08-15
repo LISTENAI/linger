@@ -38,7 +38,7 @@ cd linger && sh install.sh
 
 ### pip包安装方式
 ``` Shell
-pip install pylinger==1.1.0
+pip install pylinger==1.1.1
 ```
 
 ### docker镜像安装方式
@@ -73,20 +73,20 @@ $ sudo systemctl start docker # systemctl 命令的用法
 1）、拉取镜像
 * cpu版本
 ```shell
-docker pull listenai/linger:1.1.0
+docker pull listenai/linger:1.1.1
 ```
 * gpu版本(cuda11.2)
 ```shell
-docker pull listenai/linger_gpu:1.1.0
+docker pull listenai/linger_gpu:1.1.1
 ```
 3）、运行容器
 * cpu版本
 ```shell
-docker container run -it listenai/linger:1.1.0 /bin/bash
+docker container run -it listenai/linger:1.1.1 /bin/bash
 ```
 * gpu版本(cuda11.2)
 ```shell
-docker container run -it listenai/linger_gpu:1.1.0 /bin/bash
+docker container run -it listenai/linger_gpu:1.1.1 /bin/bash
 ```
 
 如果一切正常，运行上面的命令以后，就会返回一个命令行提示符。

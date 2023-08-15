@@ -27,3 +27,5 @@ examples/shufflenet_v2_x1_0.bin.ignore
 
 *.log
 .vscode
+
+build
