@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="pylinger",
-    version="1.1.0",
+    version="1.1.1",
     description="linger is package of fix training",
     author="listenai",
 	author_email="lingerthinker@listenai.com",
