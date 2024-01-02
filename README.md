@@ -1,4 +1,4 @@
-![image](https://github.com/LISTENAI/linger/assets/113896165/ebc60953-0b43-4575-8bc8-57d91a3de724)![linger_logo](doc/image/linger_logo.png)
+![linger_logo](doc/image/linger_logo.png)
 --------------------------------------------------------------------------------
 #### [English](README_en.md) | 简体中文  
  
