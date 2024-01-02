@@ -1,4 +1,4 @@
-![linger_logo](doc/image/linger_logo.png)
+![image](https://github.com/LISTENAI/linger/assets/113896165/ebc60953-0b43-4575-8bc8-57d91a3de724)![linger_logo](doc/image/linger_logo.png)
 --------------------------------------------------------------------------------
 #### [English](README_en.md) | 简体中文  
  
@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/github/license/LISTENAI/thinker.svg?style=flat-square)](https://github.com/LISTENAI/linger/blob/main/LICENSE)
 [![linux](https://github.com/LISTENAI/linger/actions/workflows/auto_test.yml/badge.svg)](https://github.com/LISTENAI/linger/actions/workflows/auto_test.yml)
 
-linger是由聆思科技开源的的神经网络量化训练组件，是聆思科技开源的AI生态工具链LNN(ListenAI Neural Network)的一部分，结合另一个聆思开源的推理引擎框架[thinker](https://github.com/LISTENAI/thinker)可实现产业级深度学习训练推理一体化平台，集深度学习量化训练和引擎推理、LUNA器件库和丰富的辅助组件于一体。LNN是专为聆思AIOT芯片（目前只支持CSK60xx系列）定制开发，助力开发者轻松在聆思VENUS芯片上快速上线AI业务，帮助越来越多嵌入式尤其是AIOT产品实现AI赋能，助力产业智能化升级。目前LNN工具链已支持聆思芯片在计算机视觉、语音唤醒、语音识别、离线翻译等10多个AI应用场景中的产品落地。
+linger是由安徽聆思科技和合肥智能语音公司联合开源的的神经网络量化训练组件，是聆思科技开源的AI生态工具链LNN(ListenAI Neural Network)的一部分，结合另一个聆思开源的推理引擎框架[thinker](https://github.com/LISTENAI/thinker)可实现产业级深度学习训练推理一体化平台，集深度学习量化训练和引擎推理、LUNA器件库和丰富的辅助组件于一体。LNN是专为聆思AIOT芯片（目前只支持CSK60xx系列）定制开发，助力开发者轻松在聆思VENUS芯片上快速上线AI业务，帮助越来越多嵌入式尤其是AIOT产品实现AI赋能，助力产业智能化升级。目前LNN工具链已支持聆思芯片在计算机视觉、语音唤醒、语音识别、离线翻译等10多个AI应用场景中的产品落地。
 
 ## 方案简介
 linger基于PyTorch对聆思LUNA系列芯片进行深度定制，在神经网络训练的前向过程中将激活和权重量化到8bit，通过参数调整得到量化无损的8bit模型
@@ -96,6 +96,7 @@ chmod +x ./bin/test_thinker
 - 
 ## 应用示例
 * 鼾声检测[https://github.com/mywang44/snoring_net]
+* 离线翻译[https://github.com/dwzhang00/Offline-translation]
   
 ## 版权和许可证
 - linger 由 [Apache-2.0 license](LICENSE) 提供
