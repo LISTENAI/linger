@@ -97,6 +97,7 @@ chmod +x ./bin/test_thinker
 ## 应用示例
 * 鼾声检测[https://github.com/mywang44/snoring_net]
 * 离线翻译[https://github.com/dwzhang00/Offline-translation]
+* 二维码检测与识别[https://github.com/mywang44/YOLOv1_QRcode_Detection]
   
 ## 版权和许可证
 - linger 由 [Apache-2.0 license](LICENSE) 提供
