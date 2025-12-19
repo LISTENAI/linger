@@ -5,7 +5,7 @@
 
 ### 创建虚拟环境
 ```Shell
-conda create -n linger-env python==3.7.0
+conda create -n linger-env python==3.12.10
 conda activate linger-env
 pip install -U pip
 cat requirements.txt | xargs -n 1 pip install
@@ -30,6 +30,11 @@ conda remove -n xxx --all
 
 ## linger安装
 三种方式，任选一种
+安装之前需要保证环境中：
+* gcc版本推荐 12.2.0，最低要求8.5.0
+* cmake版本推荐3.29.0，最低要求3.20.1
+* nvcc版本需与torch版本及NVIDIA硬件驱动匹配
+
 ### 源码安装方式
 ``` Shell
 git clone https://github.com/LISTENAI/linger.git
@@ -133,8 +138,7 @@ $ docker container rm [containID]
   
 ## linger安装验证
 ``` python
-Python 3.7.3 (default, Jul 8 2020, 22:11:17)
-[GCC 7.3.0] :: Anaconda, Inc. on linux
+Python 3.12.10 | packaged by conda-forge | (main, Apr 10 2025, 22:21:13) [GCC 13.3.0] on linux
 Type "help", "copyright", "credits" or "license" for more information.
 >>> import linger
 >>> 

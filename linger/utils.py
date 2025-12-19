@@ -1,19 +1,12 @@
-import logging
-import os
+import math
+import torch
+import collections
+import numpy as np
+from itertools import repeat
+from typing import List, Dict, Any
 from enum import Enum
 
-import numpy as np
-import torch
-
-logger = logging.getLogger("linger")
-logger.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s  - %(message)s')
-ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
-ch.setFormatter(formatter)
-logger.addHandler(ch)
-
-
+# 单例模式
 class Singleton(object):
     def __new__(cls, *args, **kw):
         if not hasattr(cls, '_instance'):
@@ -21,50 +14,58 @@ class Singleton(object):
             cls._instance = orig.__new__(cls, *args, **kw)
         return cls._instance
 
+class PlatForm(Enum):
+    venus   = 1
+    mars    = 2
+    arcs    = 3
+    venusA  = 4
+    jupiter = 5    
 
-class PlatFormQuant(Enum):
-    luna_quant = 1
-
+class ActivationType(Enum):
+    none    = 1
+    Relu    = 2
+    LeakRelu= 3
+    ReluX   = 4
+    Sigmoid = 5
+    Tanh    = 6
 
 class QuantMode(Enum):
-    QValue = 1
+    floor       = 0
+    floor_add   = 1
+    round       = 2
+    ceil        = 3
+
+class QuantStrategy(Enum):
+    MSE         = 1
+    RANGE_MEAN  = 2
+    NSTD        = 3
+    HIST        = 4
+    KLD         = 5
+    TQT         = 6
 
 
-class QuantInfo():
-    def __init__(self):
-        self.data_bits = 8
-        self.parameter_bits = 8
-        self.output_bits = None
-        self.mode = QuantMode.QValue
+class FakeQuantMethod(Enum):
+    NATIVE   = 1
+    CUDA     = 2 
+    COMPILE  = 3
+    TRITON   = 4
+    CUDA_GS  = 5
 
-    def set_data_bits(self, bits):
-        self.data_bits = bits
+class QatMethod(Enum):
+    TQT     = 1
+    MOM     = 2 
 
-    def set_parameter_bits(self, bits):
-        self.parameter_bits = bits
+def _ntuple(n):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable):
+            return tuple(x)
+        return tuple(repeat(x, n))
+    return parse
 
-    def set_output_bits(self, bits):
-        self.output_bits = bits
-
-    def set_mode(self, mode):
-        self.mode = mode
-
-
-class ClampInfo():
-    def __init__(self):
-        self.clamp_weight_value = 8
-        self.clamp_bias_value = 8
-        self.clamp_output_value = None
-
-    def set_clamp_weight_value(self, value):
-        self.clamp_weight_value = value
-
-    def set_clamp_bias_value(self, value):
-        self.clamp_bias_value = value
-
-    def set_clamp_output_value(self, value):
-        self.clamp_output_value = value
-
+_single = _ntuple(1)
+_pair = _ntuple(2)
+_triple = _ntuple(3)
+_quadruple = _ntuple(4)
 
 def get_device(model):
     device = None
@@ -75,39 +76,62 @@ def get_device(model):
         model._get_name())
     return device
 
+def quant(x, bits=8, scale=-1, zero_point=0, mode=QuantMode.floor_add):
+    bound_value = None
+    scale_local = None
+    max_abs = None
 
-def get_max_value(input):
-    max_value = -1
-    if isinstance(input, list):
-        input_tmp = [data.detach() for data in input]
-        for data in input_tmp:
-            tmp = torch.max(torch.abs(data))
-            max_value = max_value if max_value > tmp else tmp
+    zero_point_ = zero_point
+    if hasattr(x, 'zero_point'):
+        zero_point_ = x.zero_point
+    y = x.detach().clone()
+
+    bound_value = math.pow(2, bits - 1) - 1
+    if scale > 0:
+        scale_local = scale
+        max_abs = (bound_value + zero_point_) / scale_local
     else:
-        input_tmp = input.detach()
-        tmp = torch.max(torch.abs(input_tmp))
-        max_value = max_value if max_value > tmp else tmp
-    return max_value
+        min_x = torch.min(x)
+        max_x = torch.max(x)
+        if min_x == max_x == 0:
+            scale_local = math.pow(2, bits)
+        else:
+            max_abs = torch.max(-min_x, max_x)
+            max_value = round(math.log((bound_value + zero_point_) / max_abs, 2))
+            scale_local = math.pow(2, max_value)
+            max_abs = (bound_value + zero_point_) / scale_local
+
+    x = y * scale_local
+    
+    if mode == QuantMode.floor_add:
+        x_quant = (x + 0.5).floor()
+    elif mode == QuantMode.floor:
+        x_quant = x.floor()
+    else:
+        x_quant = x.round()
+
+    x_quant = x_quant.clamp(-bound_value - 1 + zero_point_, bound_value + zero_point_)    
+    x = x_quant.float()
+    return x, scale_local
+
+def dequant(x, scale):
+    scale_tensor = None
+    if isinstance(scale, (float, np.float32)):
+        scale_tensor = torch.tensor(
+            scale, dtype=torch.float32, device=x.device)
+    else:
+        scale_tensor = torch.tensor(
+            scale.data, dtype=torch.float32, device=x.device)
+    return (x / scale_tensor).float()
 
 
-class Dump():
-    @staticmethod
-    def dump_file(header, c_name, print_list, file_path):
-        if not os.path.exists(file_path):
-            os.makedirs(file_path)
-        for name, item in print_list:
-            if(isinstance(item, torch.Tensor)):
-                np.savetxt(os.path.join(file_path, header+c_name+name),
-                           item.detach().reshape(-1).cpu().numpy(), fmt="%.6f")
-
-
+## for RNN pack
 def _unbind(src_tensor):
     dim_0 = src_tensor.size(0)
     nums = dim_0.item() if isinstance(dim_0, torch.Tensor) else dim_0
     sub_tensor_list = [each.squeeze(0)
                        for each in src_tensor.split([1]*nums, dim=0)]
     return sub_tensor_list
-
 
 def _unbind_packed(packed_tensor, batch_sizes):
     offset = 0
@@ -119,13 +143,11 @@ def _unbind_packed(packed_tensor, batch_sizes):
         tensor_list.append(t)
     return tensor_list, batch_size_list
 
-
 def _slice(input, start, end):
     if isinstance(input, (tuple)):
         return tuple([each.narrow(0, start, end-start) for each in input])
     else:
         return input.narrow(0, start, end-start)
-
 
 def hx_slice(input_hidden, cur_hidden, last_batch_size, cur_batch_size):
     if input_hidden is None:  # forward: slice cur_hidden
@@ -141,109 +163,5 @@ def hx_slice(input_hidden, cur_hidden, last_batch_size, cur_batch_size):
         return torch.cat((cur_hidden, slice_hidden), 0)
 
 
-def qshift_round_away_from_zero(x, ):
-    x_mask = torch.ones_like(x)
-    x_mask[x < 0] = -1
-    x_abs = (x.abs() + 0.5).floor()
-    x = x_abs * x_mask
-    return x
-
-
-class ScalerBuffer():
-    def __init__(self, value):
-        if isinstance(value, torch.Tensor):
-            value = value.item()
-        elif isinstance(value, ScalerBuffer):
-            value = value.data
-        self.value = np.float32(value)
-
-    def __repr__(self):
-        return self.value
-
-    def __str__(self):
-        return str(self.value)
-
-    def fill_(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        self.value = np.float32(x)
-
-    def __add__(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        return ScalerBuffer(self.value + np.float32(x))
-
-    def __radd__(self, x):
-        return x + self.value
-
-    def add_(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        self.value = self.value + np.float32(x)
-        return self
-
-    def __mul__(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        return ScalerBuffer(self.value * np.float32(x))
-
-    def __rmul__(self, x):
-        return x * self.value
-
-    def mul_(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        self.value = self.value * np.float32(x)
-        return self
-
-    def __truediv__(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        return ScalerBuffer(self.value / np.float32(x))
-
-    def __rtruediv__(self, x):
-        return x/self.value
-
-    def __gt__(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        return True if self.value > np.float32(x) else False
-
-    def __eq__(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        return True if self.value == np.float32(x) else False
-
-    def __ne__(self, x):
-        if isinstance(x, torch.Tensor):
-            x = x.item()
-        elif isinstance(x, ScalerBuffer):
-            x = x.data
-        return True if self.value != np.float32(x) else False
-
-    def __call__(self):
-        return self.value
-
-    @property
-    def data(self):
-        return self.value
-
-
-__all__ = ['Singleton', 'PlatFormQuant', 'QuantMode', 'QuantInfo', 'ClampInfo', 'get_max_value', 'ClampInfo', 'get_device',
-           '_unbind', '_unbind_packed', '_slice', 'hx_slice', 'qshift_round_away_from_zero', 'ScalerBuffer', 'logger']
+__all__ = ['Singleton', 'PlatForm', 'ActivationType', 'QuantMode', 'QuantStrategy', 'FakeQuantMethod', 'QatMethod', 'get_device', 'quant', 'dequant',
+           '_unbind', '_unbind_packed', '_slice', 'hx_slice']

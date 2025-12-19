@@ -1,3 +1,4 @@
 include requirements.txt
 include linger/*
-include linger/lib/*
+
+exclude linger/extension

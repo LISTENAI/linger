@@ -1,13 +1,5 @@
-__pycache__
-test/__pycache__
-
-*.onnx
-*.onnx.ignore
-*.pt
-
-data.ignore/
-
 dist
+data
 linger.egg-info
 linger.egg-info/dependency_links.txt
 linger.egg-info/PKG-INFO
@@ -17,6 +9,7 @@ linger.egg-info/top_level.txt
 test/data.ignore
 test/data.ignore/aa.pt
 test/data.ignore/test1_baseline.pt
+data.ignore/
 doc/build/
 examples/dump
 examples/dump_all
@@ -24,8 +17,11 @@ examples/dump_filter
 examples/dump_part
 examples/resnet50.onnx.ignore
 examples/shufflenet_v2_x1_0.bin.ignore
-
+*.onnx
+*.onnx.ignore
+*.pt
 *.log
 .vscode
-
-build
+__pycache__
+test/__pycache__
+data.ignore

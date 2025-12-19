@@ -1,73 +1,84 @@
-import os
-
-import linger
-import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.fx import symbolic_trace, GraphModule
+import operator
 
-if not os.path.exists('data.ignore'):
-    os.mkdir('data.ignore')
+# ======================
+# 定义 QAdd 模块
+# ======================
+class QAdd(nn.Module):
+    def __init__(self):
+        super(QAdd, self).__init__()
+    def forward(self, x, y):
+        # 这里可以放量化逻辑
+        return x * y
 
 
-def test_softmaxint():
-    class Net(nn.Module):
-        def __init__(self):
-            super(Net, self).__init__()
-            self.fc1 = nn.Linear(64, 256)
-            self.fc2 = nn.Linear(64, 256)
-            self.fc3 = nn.Linear(64, 256)
-            self.fc4 = nn.Linear(480, 1000)
+# ======================
+# 原始模型：含 add 操作
+# ======================
+class MyModel(nn.Module):
+    def __init__(self):
+        super(MyModel, self).__init__()
+        self.fc1 = nn.Linear(10, 10)
+        self.fc2 = nn.Linear(10, 10)
+        self.act = nn.ReLU()
 
-        def forward(self, input):
-            x = self.fc1(input)
-            y = self.fc2(input)
-            z = self.fc3(input)
+    def forward(self, x):
+        out1 = self.fc1(x)
+        out2 = self.fc2(x)
+        out = out1 + out2   # ⚠️ 这里是 add
 
-            x = x.view(8, 15, 32)
-            y = y.view(8, 32, 15)
-            z = z.view(8, 15, 32)
-            x = torch.bmm(x, y)
-            x = torch.softmax(x, dim=-1)
-            x = torch.bmm(x, z)
-            x = x.view(8, 480)
-            x = self.fc4(x)
-            x = torch.log_softmax(x, dim=-1)
+        b1 = out.unsqueeze(1)         # (B, 1, 10)
+        b2 = out.unsqueeze(2)         # (B, 10, 1)
+        out = torch.bmm(b1, b2) 
+        
+        out = self.act(out)
+        return out
 
-            return x
 
-    torch.manual_seed(1)
-    torch.cuda.manual_seed_all(1)
-    np.random.seed(1)
-    #gpu code current has bugs to fix
-    torch.cuda.set_device(0)
-    net = Net().cuda()
-    dummy_input = torch.randn(15, 64, requires_grad=True).cuda()
-    target = torch.ones(8, dtype=torch.int64).cuda()
-    # net = Net()
-    # dummy_input = torch.randn(15, 64, requires_grad=True)
-    # target = torch.ones(1, dtype=torch.int64)
-    criterion = nn.CrossEntropyLoss()
-    replace_tuple = (nn.Linear)
-    net.train()
-    linger.SetFunctionBmmQuant(True)
-    linger.SetPlatFormQuant(platform_quant=linger.PlatFormQuant.luna_quant)
-    net = linger.init(net, quant_modules=replace_tuple,
-                      mode=linger.QuantMode.QValue)
-    optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
-    loss = None
-    for i in range(10):
-        optimizer.zero_grad()
-        out = net(dummy_input)
-        loss = criterion(out, target)
-        if i % 1 == 0:
-            print('loss: ', loss)
-        loss.backward()
-        optimizer.step()
-    net.eval()
-    torch.save(net.state_dict(), 'data.ignore/softmax.pt')
-    out1 = net(dummy_input)
-    with torch.no_grad():
-        torch.onnx.export(net, dummy_input, "data.ignore/softmax_net.onnx", export_params=True,
-                          opset_version=11, operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK)
-    out2 = net(dummy_input)
-    assert out1.abs().sum() == out2.abs().sum()
+# ======================
+# FX Graph Transform
+# ======================
+def replace_add_with_qadd(gm: GraphModule) -> GraphModule:
+    graph = gm.graph
+    for node in list(graph.nodes):
+        # 查找 add 节点（可能是 operator.add 或 Tensor.__add__）
+        if node.op == "call_function" and node.target in (operator.add, torch.add, torch.ops.aten.add.Tensor):
+            with graph.inserting_after(node):
+                # 插入 QAdd 模块
+                qadd_mod = QAdd()
+                qadd_name = f"qadd_{node.name}"
+                gm.add_module(qadd_name, qadd_mod)
+
+                new_node = graph.call_module(qadd_name, args=node.args)
+                node.replace_all_uses_with(new_node)
+                graph.erase_node(node)
+    graph.lint()
+    gm.recompile()
+    return gm
+
+
+# ======================
+# 测试
+# ======================
+if __name__ == "__main__":
+    model = MyModel()
+    traced = symbolic_trace(model)
+    print("原始Graph:")
+    print(traced.graph)
+
+    x = torch.randn(4, 10)
+    y = model(x)
+    print("原始模型:", x, y)
+
+    # 替换 add -> QAdd
+    new_gm = replace_add_with_qadd(traced)
+    print("\n替换后的Graph:")
+    print(new_gm.graph)
+
+    # 验证运行
+    # x = torch.randn(4, 10)
+    y = new_gm(x)
+    print("\n模型输出:", x, y)

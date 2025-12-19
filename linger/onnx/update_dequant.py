@@ -42,7 +42,7 @@ def insert_op_before(model, node_input, node_output, target_node_index, input_i,
         'Dequant',
         inputs=[node_input],
         outputs=["Dequant_"+str(node_input)+"_"+str(node_output)],
-        domain="thinker",
+        domain="linger",
         **kwargs['attr_dict']
     )
 
@@ -90,7 +90,7 @@ def insert_op_after(model, node_input, node_output, target_node_index, output_i,
         'Dequant',
         inputs=["Dequant_"+str(node_input)+"_"+str(node_output)],
         outputs=[node_input],
-        domain="thinker",
+        domain="linger",
         **kwargs['attr_dict']
     )
 
@@ -259,7 +259,7 @@ def infer_type_linger(model, is_change_in_out_type):
                 if node.op_type == "Slice" or node.op_type == "Split":
                     for quant_node in nodes:
                         for iii in range(len(node.output)):
-                            if quant_node.input == [node.output[iii]] and quant_node.op_type == "OnnxInferQuant":
+                            if quant_node.input == [node.output[iii]]:
                                 if in_type[0] == 3:
                                     in_type[0] = 0
             else:
