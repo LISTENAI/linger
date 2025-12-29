@@ -301,7 +301,7 @@ def node_equal(inputs, kwargs):
 
 
 @register_op(op_type="Squeeze")
-def squeeze(node_name ,inputs, kwargs):
+def squeeze(inputs, kwargs):
     axes = get_param(kwargs, "axes")
     tensor = inputs[0]
     for axis in sorted(axes, reverse=True):

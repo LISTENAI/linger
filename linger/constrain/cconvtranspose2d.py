@@ -5,14 +5,11 @@ from .cmodule import CModuleMixin, register_cmodule
 from typing import Optional, Union, Dict, Any
 
 @register_cmodule(torch.nn.ConvTranspose2d)
-class QConvTranspose2d(CModuleMixin, torch.nn.ConvTranspose2d):
+class CConvTranspose2d(CModuleMixin, torch.nn.ConvTranspose2d):
     @classmethod
-    def qcreate(
+    def ccreate(
         cls,
         module,
-        activations_cfg: Optional[Dict[str, Any]] = None,
-        weights_cfg: Optional[Dict[str, Any]] = None,
-        bias_cfg: Optional[Dict[str, Any]] = None,
         constrain: Optional[Dict[str, Any]] = None,
         device: Optional[Dict[str, Any]] = None,
     ):
@@ -29,17 +26,14 @@ class QConvTranspose2d(CModuleMixin, torch.nn.ConvTranspose2d):
             padding_mode=module.padding_mode,
             dtype=module.weight.dtype,
             device=device,
-            activations_cfg=activations_cfg,
-            weights_cfg=weights_cfg,
-            bias_cfg=bias_cfg,
             constrain = constrain, 
         )
 
-    def qforward(self, input: torch.Tensor, output_size: Optional[List[int]] = None) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, output_size: Optional[List[int]] = None) -> torch.Tensor:
         return F.conv_transpose2d(
             input, 
-            self.qweight, 
-            self.qbias,
+            self.cweight, 
+            self.cbias,
             self.stride,
             self.padding,
             self.output_padding,

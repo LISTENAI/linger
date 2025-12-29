@@ -1,42 +1,28 @@
 import torch
 from typing import Dict, Any, Optional
 from .qtensor_mod import QModuleTensor
-from ....config import QUANT_CONFIGS
-from ....utils import PlatForm
-# def add(module, x, y, name="_default"):
-#     assert isinstance(x, QTensor)
-#     assert isinstance(y, (QTensor, float, int))
+from ....onnx import generate_onnx_qparam_dict, QDOMAIN_NAME
 
-#     quant_info = getattr(module, LINGER_QUANTINFO, QuantInfo())
+class QAddOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, y, qparam_dict = None):
+        return x + y
+    @staticmethod
+    def symbolic(g, x, y, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        input_list = [x, y]
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
-#     var_name = name
-#     iq_layer = None
-#     if hasattr(module, var_name):
-#         iq_layer = getattr(module, var_name)
-#     else:
-#         iq_layer = QAdd(quant_info=quant_info)
-#         iq_layer.training = module.training
-#         iq_layer = iq_layer.to(x.device)
-#         setattr(module, var_name, iq_layer)
-
-#     return iq_layer(x, y)
-
-# @register_qmodule(torch.add)
-# @register_qmodule(operator.add)
-# @register_qmodule(torch.ops.aten.add.Tensor)
 class QAdd(QModuleTensor):
-    r"""对iqadd的layer封装
+    r"""对QAdd的layer封装
 
     """
-    # def __init__(self, activate_config: Optional[Dict[str, Any]] = None, num_input: int = 2):
-    #     super(QAdd, self).__init__(activate_config, num_input)
-
-    #     self.prefix         = ""
-    #     self.dump           = False
-    #     self.path           = ""
-    #     self.a_config       = activate_config
-
-
     @classmethod
     def qcreate(
         cls,
@@ -50,8 +36,11 @@ class QAdd(QModuleTensor):
             num_input = num_input
         )
 
-    def qforward(self, x, y):
-        if self.training:
+    def forward(self, x, y):
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, True)
+            return QAddOnnxFunction.apply(x, y, qparam_dict)
+        elif self.training:
             self.output_quantizer.min_scale = torch.min(self.input_quantizer[0].scale, self.input_quantizer[1].scale)
         else:
             if self.output_quantizer.scale != self.input_quantizer[0].scale:

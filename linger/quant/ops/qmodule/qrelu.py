@@ -7,6 +7,7 @@ from ..qconfig import register_qmodule
 from typing import Optional, Union, Dict, Any
 
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 @register_qmodule(nn.ReLU)
 class QRelu(QModuleMixin, nn.ReLU):

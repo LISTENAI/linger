@@ -5,7 +5,6 @@ from typing import Dict, Any, Optional
 from ...quantizer import AQuantizer
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....config import QUANT_CONFIGS
-from ....onnx import generate_onnx_qparam_dict, QCustomOpSymbolic
 
 __all__ = ["QModuleTensor"]
 
@@ -29,27 +28,30 @@ class QModuleTensor(torch.nn.Module):
         self._quantize_hooks["output"] = self.register_forward_hook(self.quantize_output)
 
 
-    def quantize_input(self, module: torch.nn.Module, input: torch.Tensor) -> torch.Tensor:
+    def quantize_input(self, module: torch.nn.Module, input) -> torch.Tensor:
         device = QUANT_CONFIGS.device
         
         # 创建处理后的输入列表
         processed_inputs = []
         
         for i in range(len(input)):
-            current_input = input[i]
-            
-            # 标准化输入 - 创建新的tensor而不是修改原元组
-            if not isinstance(current_input, torch.Tensor) and not isinstance(current_input, QTensor):
-                current_input = torch.tensor(current_input, dtype=torch.float32, device=device)
-            
-            # 量化处理
-            if isinstance(current_input, QTensor):
-                tmp_input = from_qtensor_to_tensor(current_input)
-                self.input_quantizer[i].scale.fill_(current_input.scale.detach())
-                self.input_quantizer[i].data_bits = current_input.data_bits
+            if i < self.num_input:
+                current_input = input[i]
+                
+                # 标准化输入 - 创建新的tensor而不是修改原元组
+                if not isinstance(current_input, torch.Tensor) and not isinstance(current_input, QTensor):
+                    current_input = torch.tensor(current_input, dtype=torch.float32, device=device)
+                
+                # 量化处理
+                if isinstance(current_input, QTensor):
+                    tmp_input = from_qtensor_to_tensor(current_input)
+                    self.input_quantizer[i].scale.fill_(current_input.scale.detach())
+                    self.input_quantizer[i].data_bits = current_input.data_bits
+                else:
+                    tmp_input = self.input_quantizer[i](current_input)
+                processed_inputs.append(tmp_input)
             else:
-                tmp_input = self.input_quantizer[i](current_input)
-            processed_inputs.append(tmp_input)
+                processed_inputs.append(input[i])
         
         return tuple(processed_inputs)
         
@@ -118,18 +120,8 @@ class QModuleTensor(torch.nn.Module):
 
         return qmodule.to(device)
     
-    def qforward(self, input: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
-    
     def forward(self, input: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        other = None if len(args) == 0 else args[0]
-        if torch.onnx.is_in_onnx_export():
-            qparam_dict = generate_onnx_qparam_dict(self, True)
-            if self.is_cat:
-                return QCustomOpSymbolic.apply(input[0], None, None, qparam_dict, input[1], other)
-            return QCustomOpSymbolic.apply(input, None, None, qparam_dict, other)
-        else:
-            return self.qforward(input, other)
+        raise NotImplementedError
 
     def extra_repr(self):
         extra_s = ''

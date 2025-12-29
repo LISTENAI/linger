@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
 
 @register_qmodule(nn.MaxPool2d)

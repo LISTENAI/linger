@@ -9,7 +9,6 @@ from ..qconfig import _QMODULE_TABLE
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....config import QUANT_CONFIGS
-from ....onnx import generate_onnx_qparam_dict, QCustomOpSymbolic, QCustomRNNSymbolic
 
 __all__ = ["QModuleMixin"]
 
@@ -99,29 +98,9 @@ class QModuleMixin(ABC):
             return self.bias
         fake_bias = self.bias_quantizer(self.bias, self.weight_quantizer.scale * self.input_quantizer.scale)
         return fake_bias
-
-    def qforward(self, input: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
     
     def forward(self, input: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        if torch.onnx.is_in_onnx_export():
-            weight = None if not hasattr(self, "weight_quantizer") else self.weight
-            bias = None if not hasattr(self, "bias_quantizer") else self.bias
-            qparam_dict = generate_onnx_qparam_dict(self, False)
-            if 'GRU' in self._get_name() or 'LSTM' in self._get_name():
-                self.input_quantizer.is_qtensor = True if isinstance(input, QTensor) else False
-                if self.bidirectional:
-                    out, _ = QCustomRNNSymbolic.apply(input, self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0, \
-                                                    self.weight_ih_l0_reverse, self.weight_hh_l0_reverse, self.bias_ih_l0_reverse, self.bias_hh_l0_reverse, qparam_dict, self.input_quantizer.is_qtensor)
-                else:
-                    out, _ =  QCustomRNNSymbolic.apply(input, self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0, None, None, None, None, qparam_dict, self.input_quantizer.is_qtensor)
-                return from_tensor_to_qtensor(out, self.output_quantizer.scale, self.output_quantizer.data_bits), _
-            elif 'Embedding' in self._get_name():
-                out = QCustomOpSymbolic.apply(input, weight, bias, qparam_dict, True)
-                return from_tensor_to_qtensor(out, self.weight_quantizer.scale, self.weight_quantizer.data_bits)
-            return QCustomOpSymbolic.apply(input, weight, bias, qparam_dict, self.input_quantizer.is_qtensor)
-        else:
-            return self.qforward(input, *args, **kwargs)
+        raise NotImplementedError
         
     def quantize_input(self, module: torch.nn.Module, input: torch.Tensor) -> torch.Tensor:
         input = input[0]

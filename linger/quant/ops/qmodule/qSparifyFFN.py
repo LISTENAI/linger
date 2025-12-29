@@ -14,6 +14,31 @@ from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....config import QUANT_CONFIGS
 from ....utils import _single, _pair, _triple, QatMethod
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+
+class QSparifyFFNFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, weight_fc1, weight_fc2, bias_fc1, bias_fc2, weight_mask, bias_mask, qparam_dict = None):
+        return F.linear(F.linear(input, weight_fc1, bias_fc1), weight_fc2, bias_fc2)
+    @staticmethod
+    def symbolic(g,  input, weights, bias, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weights]
+        else:
+            input_list = [input, weights]
+        if bias is not None:
+            input_list.append(bias)
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 @register_qmodule(SparifyFFN)
 class QSparifyFFN(QModuleMixin, SparifyFFN):
@@ -125,7 +150,10 @@ class QSparifyFFN(QModuleMixin, SparifyFFN):
             fake_input = self.outmask_quantizer(input) # 前向过程中会更新input_quantizer的scale
         return fake_input
 
-    def qforward(self, input):
+    def forward(self, input):
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, False)
+            return QSparifyFFNFunction.apply(input, self.weight_fc1, self.weight_fc2, self.bias_fc1, self.bias_fc2, self.weight_mask, self.bias_mask, qparam_dict)
         outL0 = F.linear(input, self.qweight_fc1, self.qbias_fc1)
         outL = self.quantize_outL(outL0)
 

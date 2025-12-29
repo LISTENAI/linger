@@ -6,11 +6,13 @@ from linger.config import QUANT_CONFIGS
 import numpy as np
 import linger
 from linger.utils import quant, dequant
-from .utils import create_qmodule, create_qmodule_tensor, load_quantized_weights, StringToQuantMode
+from .utils import create_qmodule, create_qmodule_tensor, load_quantized_weights, StringToQuantMode, canonicalize_attrs
+from .utils import create_rnn_module, load_rnn_quantized_weights
 
-@register_op(op_type="AvgPool2dInt")
+@register_op(op_type=['QAvgPool2d', 'AvgPool2dInt'])
 def avgpool2dint(inputs, kwargs):
     input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
 
     kernel_size = tuple(kwargs['kernel_shape'])
     stride = tuple(kwargs['strides'])
@@ -24,7 +26,7 @@ def avgpool2dint(inputs, kwargs):
 
     return instance(input)
 
-@register_op(op_type="Conv1dInt")
+@register_op(op_type=['QConv1d', 'Conv1dInt'])
 def conv1dInt(inputs, kwargs):
     inputs_len = len(inputs)
     assert inputs_len == 2 or inputs_len == 3, \
@@ -34,6 +36,7 @@ def conv1dInt(inputs, kwargs):
         bias = None
     else:
         input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     in_channels = input.shape[1]
     out_channels = weights.shape[0]
@@ -44,17 +47,18 @@ def conv1dInt(inputs, kwargs):
     group = kwargs.get('group', 1)
     device = input.device
 
-    module = nn.Conv1d(in_channels, out_channels, kernel_shape, strides, padding, dilations, group).to(device)
+    module = nn.Conv1d(in_channels, out_channels, kernel_shape, strides, padding, dilations, group, bias=bias!=None).to(device)
 
     instance = create_qmodule(QConv1d, module, device, kwargs)
-    instance = load_quantized_weights(instance, kwargs, weights, bias)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
     
     res =  instance(input)
     if kwargs.get('act_type', 0) == 1:
         res = F.relu(res)
     return res
 
-@register_op(op_type='Conv2dInt')
+@register_op(op_type=['QConv2d', 'QConvBN2d', 'Conv2dInt'])
 def conv2dint(inputs, kwargs):
     inputs_len = len(inputs)
     assert inputs_len == 2 or inputs_len == 3, \
@@ -64,6 +68,7 @@ def conv2dint(inputs, kwargs):
         bias = None
     else:
         input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     in_channels = input.shape[1]
     out_channels = weights.shape[0]
@@ -78,10 +83,11 @@ def conv2dint(inputs, kwargs):
     group = kwargs.get('group', 1)
     device = input.device
 
-    module = torch.nn.Conv2d(in_channels, out_channels, kernel_shape, strides, pads, dilations, group).to(device)
+    module = torch.nn.Conv2d(in_channels, out_channels, kernel_shape, strides, pads, dilations, group, bias=bias!=None).to(device)
     
     instance = create_qmodule(QConv2d, module, device, kwargs)
-    instance = load_quantized_weights(instance, kwargs, weights, bias)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
     
     res = instance(input)
 
@@ -89,11 +95,11 @@ def conv2dint(inputs, kwargs):
         res = F.relu(res)
     return res
 
-@register_op(op_type='LinearInt')
+@register_op(op_type=['QLinear', 'LinearInt'])
 def linearint(inputs, kwargs):
     inputs_len = len(inputs)
     assert inputs_len == 2 or inputs_len == 3, \
-    f"LinearInt ops: the number of input_tensors is wrong, \
+    f"LinearInt ops: the number of inputs is wrong, \
     expect 2 or 3, but {inputs_len}, the length of List must be 2([input,weight]) or 3\
     ([input,weight,bias])"
     if inputs_len == 2:
@@ -101,6 +107,7 @@ def linearint(inputs, kwargs):
         bias = None
     else:
         input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     out_features, in_features = weights.shape
     has_bias = inputs_len == 3
@@ -109,11 +116,12 @@ def linearint(inputs, kwargs):
     module = nn.Linear(in_features, out_features, has_bias).to(device)
 
     instance = create_qmodule(QLinear, module, device, kwargs)
-    instance = load_quantized_weights(instance, kwargs, weights, bias)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
 
     return instance(input)
 
-@register_op(op_type='iqCat')
+@register_op(op_type=['QCat', 'iqCat'])
 def iqcat(inputs, kwargs):
     kwargs['is_cat'] = True
     dim = kwargs.get('dim', -1)
@@ -142,20 +150,21 @@ def dequant_(inputs, kwargs):
     input = inputs[0]
     return input
 
-@register_op(op_type="BmmInt")
+@register_op(op_type=['QBmm', 'BmmInt'])
 def bmmint(inputs, kwargs):
     num_input = len(inputs)
     assert num_input == 2, f'invalid input number, expeted 2, but got {num_input}'
     input_0, input_1 = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QBmm, None, 2, kwargs)
     return instance(input_0, input_1)
 
-@register_op(op_type="LayerNormInt")
+@register_op(op_type=['QLayerNorm', 'LayerNormInt'])
 def layernormint(inputs, kwargs):
     inputs_len = len(inputs)
     assert inputs_len == 2 or inputs_len == 3, \
-    f"LayerNormInt ops: the number of input_tensors is wrong, \
+    f"LayerNormInt ops: the number of inputs is wrong, \
     expect 2 or 3, but {inputs_len}, the length of List must be 2([input,weight]) or 3\
     ([input,weight,bias])"
     if inputs_len == 2:
@@ -163,23 +172,24 @@ def layernormint(inputs, kwargs):
         bias = None
     else:
         input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
-    has_bias = inputs_len == 3
     axis = kwargs.get('axis', -1)
-    input_shape = list(input.shape)
-    normalized_shape = input_shape[axis if axis>=0 else len(input_shape) + axis :]
+    normalized_shape = list(input.shape)[axis:]
     device = input.device
 
     module = nn.LayerNorm(normalized_shape, device=device)
 
     instance = create_qmodule(QLayerNorm, module, device, kwargs)
-    instance = load_quantized_weights(instance, kwargs, weights, bias)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
 
     return instance(input)
 
-@register_op(op_type="GluInt")
+@register_op(op_type=['QGLU', 'GluInt'])
 def gluint(inputs, kwargs):
     input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
 
     dim = kwargs.get('dim', -1)
     module = nn.GLU(dim=dim)
@@ -190,18 +200,31 @@ def gluint(inputs, kwargs):
 
 @register_op(op_type='MaxPool')
 def maxpool2d(inputs, kwargs):
-    kernel_size = get_param(kwargs,"kernel_shape")
-    pads = get_param(kwargs,"pads")
-    strides = get_param(kwargs,'strides')
-    dilation = kwargs.get("dilation",1)
-    ceil_mode = bool(kwargs.get('ceil_mode',False))
-    return F.max_pool2d(inputs[0], kernel_size, strides, pads[0], dilation, ceil_mode)
+    input = inputs[0]
 
-@register_op(op_type='iqAdd')
+    kernel_size = tuple(kwargs.get('kernel_shape', None))
+    pads = kwargs.get('pads', None)
+    if pads is not None:
+        pads = tuple(pads[0:2])
+    else:
+        pads = (0, 0)
+    strides = get_param(kwargs,'strides')
+    dilations = tuple(kwargs.get('dilations', (1, 1)))
+    ceil_mode = bool(kwargs.get('ceil_mode',False))
+    device = input.device
+
+    module = nn.MaxPool2d(kernel_size, strides, pads, dilations, False, ceil_mode)
+
+    instance = create_qmodule(QMaxPool2d, module, device, kwargs)
+
+    return instance(input)
+
+@register_op(op_type=['QAdd', 'iqAdd'])
 def iqadd(inputs, kwargs):
     input_len = len(inputs)
     assert input_len == 2, 'The inputs number of iqAdd is wrong'
     input_0, input_1 = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QAdd, None, 2, kwargs)
     return instance(input_0, input_1)
@@ -212,11 +235,12 @@ def iqadd(inputs, kwargs):
 #     op_cls = get_op_class(platform, "iqDiv")
 #     return op_cls.excute_base(inputs, kwargs)
 
-@register_op(op_type='iqMul')
+@register_op(op_type=['QMul', 'iqMul'])
 def iqmul(inputs, kwargs):
     input_len = len(inputs)
     assert input_len == 2, 'The inputs number of iqMul is wrong'
     x, y = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     scale_x = kwargs.get('scale_x')
     scale_y = kwargs.get('scale_y')
@@ -287,7 +311,7 @@ def cast(inputs, kwargs):
             raise TypeError("Type Error!!Current Version don't support {}(type:{}) in cast node!!!".format(to,onnx_dtype(to)))
     return output
 
-@register_op(op_type= "ConvTranspose2dInt")
+@register_op(op_type= ['QConvTranspose2d', 'ConvTranspose2dInt'])
 def convTranspose2dInt(inputs, kwargs):
     inputs_len = len(inputs)
     assert inputs_len == 2 or inputs_len == 3, \
@@ -297,6 +321,7 @@ def convTranspose2dInt(inputs, kwargs):
         bias = None
     else:
         input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     in_channels = input.shape[1]
     out_channels = weights.shape[0]
@@ -314,7 +339,8 @@ def convTranspose2dInt(inputs, kwargs):
     module = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_shape, strides, pads, dilations, group).to(device)
     
     instance = create_qmodule(QConvTranspose2d, module, device, kwargs)
-    instance = load_quantized_weights(instance, kwargs, weights, bias)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
     
     res = instance(input)
 
@@ -328,18 +354,20 @@ def convTranspose2dInt(inputs, kwargs):
 #     op_cls = get_op_class(platform, "iqSum")
 #     return op_cls.excute_base(inputs, kwargs)
 
-@register_op(op_type="MatMulInt")
+@register_op(op_type=['QMatmul', 'MatMulInt'])
 def matmulint(inputs, kwargs):
     num_input = len(inputs)
     assert num_input == 2, f'invalid input number, expeted 2, but got {num_input}'
     input_0, input_1 = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QMatmul, None, 2, kwargs)
     return instance(input_0, input_1)
 
-@register_op(op_type="BatchNorm2dInt")
+@register_op(op_type=['QBatchNorm2d', 'BatchNorm2dInt'])
 def batchnorm2dInt(inputs, kwargs):
     input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
 
     num_features = input.shape[1]
     device = input.device
@@ -347,40 +375,95 @@ def batchnorm2dInt(inputs, kwargs):
     module = nn.BatchNorm2d(num_features)
 
     instance = create_qmodule(QBatchNorm2d, module, device, kwargs)
-    instance = load_quantized_weights(instance, kwargs, weights, bias)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
 
     return instance(input)
-# @register_op(op_type="GRUInt")
-# def gruint(inputs, kwargs):
-#     platform = kwargs.get("platform", "")
-#     op_cls = get_op_class(platform, "GRUInt")
-#     return op_cls.excute_base(inputs, kwargs)
 
-# @register_op(op_type="LSTMInt")
-# def lstmint(inputs, kwargs):
-#     platform = kwargs.get("platform", "")
-#     op_cls = get_op_class(platform, "LSTMInt")
-#     return op_cls.excute_base(inputs, kwargs)
+@register_op(op_type="GRUInt")
+def gruint(inputs, kwargs):
+    inputs_len = len(inputs)
+    assert inputs_len == 5, f'GRUInt/QGRU input numbuder {inputs_len} is invalid.'
+    input, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+    
+    device = input.device
+    batch_first = kwargs.get('batch_first', 1)
+    batch_first = True if batch_first else False
+    kwargs = canonicalize_attrs(kwargs)
 
-@register_op(op_type= "iqSigmoid")
+    module = nn.GRU(input_size=kwargs.get("input_size", None), hidden_size = kwargs.get("hidden_size", None),
+                     num_layers=kwargs.get("num_layers", None), bias=True, batch_first=batch_first,
+                     dropout=0, bidirectional=False)
+    
+    instance = create_rnn_module(QGRU, module, device, kwargs)
+    instance = load_rnn_quantized_weights(instance, kwargs, weight_ih, weight_hh, bias_ih, bias_hh)
+
+    if kwargs['go_forward'] == 1:  
+        return instance(input)
+    else:
+        reversed_input = torch.flip(input, dims=[1])
+        out = instance(reversed_input)
+        out_0 = torch.flip(out[0], dims=[1])
+        return tuple([out_0, out[1]])
+    
+
+@register_op(op_type=['QLSTM', "LSTMInt"])
+def lstmint(inputs, kwargs):
+    inputs_len = len(inputs)
+    seq_lens, h0, c0 = None, None, None
+    if inputs_len == 5:
+        input, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+    elif inputs_len == 6:
+        input, seq_lens, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+    elif inputs_len == 7:
+        input, h0, c0, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+    elif inputs_len == 8:
+        input, seq_lens, h0, c0, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+
+    device = input.device
+    batch_first = kwargs.get('batch_first', 1)
+    batch_first = True if batch_first else False
+    kwargs = canonicalize_attrs(kwargs)
+
+    module = nn.LSTM(input_size=kwargs.get("input_size", None), hidden_size = kwargs.get("hidden_size", None),
+                     num_layers=kwargs.get("num_layers", None), bias=True, batch_first=batch_first,
+                     dropout=0, bidirectional=False, proj_size=kwargs.get('proj_size', 0))
+    
+    instance = create_rnn_module(QLSTM, module, device, kwargs)
+    instance = load_rnn_quantized_weights(instance, kwargs, weight_ih, weight_hh, bias_ih, bias_hh)
+
+    if kwargs['go_forward'] == 1:  
+        return instance(input)
+    else:
+        reversed_input = torch.flip(input, dims=[1])
+        out = instance(reversed_input)
+        out_0 = torch.flip(out[0], dims=[1])
+        return tuple([out_0, out[1]])
+    
+
+@register_op(op_type=['QSigmoid', 'iqSigmoid'])
 def iqsigmoid(inputs, kwargs):
     input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QSigmoid, None, 1, kwargs)
     return instance(input)
 
-@register_op(op_type="iqTanh")
+@register_op(op_type=['QTanh', 'iqTanh'])
 def iqtanh(inputs, kwargs):
     input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QTanh, None, 1, kwargs)
     return instance(input)
 
-@register_op(op_type="SoftmaxInt")
+@register_op(op_type=['QSoftmax', 'SoftmaxInt'])
 def softmaxInt(inputs,kwargs):
     input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
 
     dim = kwargs.get('axis', -1)
+    kwargs['dim'] = dim
 
     instance = create_qmodule_tensor(QSoftmax, None, 1, kwargs)
     return instance(input)

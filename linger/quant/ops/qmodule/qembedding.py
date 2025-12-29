@@ -8,6 +8,38 @@ from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from typing import Optional, Union, Dict, Any
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+
+class QEmbeddingOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse, qparam_dict= None):
+        return F.embedding(
+                    input,
+                    weight,
+                    padding_idx,
+                    max_norm,
+                    norm_type,
+                    scale_grad_by_freq,
+                    sparse,
+                )
+        
+    @staticmethod
+    def symbolic(g,  input, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse, qparam_dict= None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::Gather"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weight]
+        else:
+            input_list = [input, weight]
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 @register_qmodule(torch.nn.Embedding)
 class QEmbedding(QModuleMixin, nn.Embedding):
@@ -41,7 +73,10 @@ class QEmbedding(QModuleMixin, nn.Embedding):
             open_ohook = False
         )
 
-    def qforward(self, input):
+    def forward(self, input):
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, False)
+            return QEmbeddingOnnxFunction.apply(input, self.weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse, qparam_dict)
         out_q =  F.embedding(
                     input,
                     self.qweight,

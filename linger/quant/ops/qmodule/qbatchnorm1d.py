@@ -2,7 +2,60 @@ import torch
 import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
+
+class QBatchNorm1dOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, running_mean, training, track_running_stats, running_var, weight, bias, momentum, eps, qparam_dict = None):
+        if momentum is None:
+            exponential_average_factor = 0.0
+        else:
+            exponential_average_factor = momentum
+
+        if training and track_running_stats:
+            num_batches_tracked += 1
+            if momentum is None:
+                exponential_average_factor = 1.0 / float(num_batches_tracked)
+            else:
+                exponential_average_factor = momentum
+        if training:
+            bn_training = True
+        else:
+            bn_training = (running_mean is None) and (running_var is None)
+
+        return F.batch_norm(
+                input,
+                # If buffers are not to be tracked, ensure that they won't be updated
+                running_mean
+                if not training or track_running_stats
+                else None,
+                running_var if not training or track_running_stats else None,
+                weight,
+                bias,
+                bn_training, 
+                exponential_average_factor,
+                eps,
+            )
+    @staticmethod
+    def symbolic(g,  input, running_mean, training, track_running_stats, running_var, weight, bias, momentum, eps, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weight]
+        else:
+            input_list = [input, weight]
+        if bias is not None:
+            input_list.append(bias)
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 @register_qmodule(torch.nn.BatchNorm1d)
 class QBatchNorm1d(QModuleMixin, torch.nn.BatchNorm1d):
@@ -31,7 +84,10 @@ class QBatchNorm1d(QModuleMixin, torch.nn.BatchNorm1d):
             constrain = constrain, 
         )
 
-    def qforward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, False)
+            return QBatchNorm1dOnnxFunction.apply(input, self.running_mean, self.training, self.track_running_stats, self.running_var, self.weight, self.bias, self.momentum, self.eps, qparam_dict)
         if self.momentum is None:
             exponential_average_factor = 0.0
         else:

@@ -5,7 +5,31 @@ from typing import Optional, Union, Dict, Any
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ....constrain.cconvbn2d import CConvBN2d, ConvBN2d
-from ....onnx import generate_onnx_qparam_dict, QCustomOpSymbolic
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+
+class QConvBN2dOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+        return F.conv2d(input, weights, bias, stride=stride, padding=padding, dilation=dilation, groups=groups)
+    @staticmethod
+    def symbolic(g, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weights]
+        else:
+            input_list = [input, weights]
+        if bias is not None:
+            input_list.append(bias)
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 @register_qmodule(ConvBN2d)
 @register_qmodule(CConvBN2d)
@@ -98,7 +122,6 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
             new_bias = b_conv_.mul(w_bn_) + b_bn_
 
             alpha = 0.1
-
             # fake_quant new_weight and new_bias
             fake_weight = self.weight_quantizer(new_weight)
             fake_bias = self.bias_quantizer(new_bias)
@@ -120,10 +143,10 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
             self.bias.data = new_bias
             if torch.onnx.is_in_onnx_export():
                 qparam_dict = generate_onnx_qparam_dict(self, False)
-                output = QCustomOpSymbolic.apply(input, self.weight, self.bias, qparam_dict, self.input_quantizer.is_qtensor)
+                output = QConvBN2dOnnxFunction.apply(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
             else:
                 output = F.conv2d(input, self.qweight, self.qbias, self.stride,
-                              self.padding, self.dilation, self.groups)
+                            self.padding, self.dilation, self.groups)
         
         return output
 

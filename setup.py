@@ -34,7 +34,7 @@ if version_maj*100+version_min*10 + version_patch >= 151:
 
 setup(
     name="linger",
-    version="3.0.2",
+    version="3.0.3",
     description="linger is package of fix training",
     author="ListenAI",
     ext_modules=[
@@ -54,7 +54,10 @@ setup(
     cmdclass={
         'build_ext': BuildExtension
     },
-    packages=find_packages(),
+    packages=find_packages(exclude=['tools', 'tools.*'])+ ['linger.checker'],
+    package_dir={
+        'linger.checker': 'tools/checker'
+    },
     include_package_data=True,
     classifiers=[
         "Operating System :: OS Independent",

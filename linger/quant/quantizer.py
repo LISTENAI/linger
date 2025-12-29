@@ -129,7 +129,7 @@ class Quantizer(torch.nn.Module, ):
                 learning_data_temp = self.data_bits - 1 - self.learning_data
             elif self.qat_method == QatMethod.MOM:
                 abs_max = input.abs().max()
-                self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max)
+                self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
                 learning_data_temp = self.data_bits - 1 - abs_max.log2()
             else:
                 raise ValueError("Only TQT and MOM strategies are supported! ")
@@ -164,7 +164,7 @@ class Quantizer(torch.nn.Module, ):
                 out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, self.learning_data, min_scale, self.quant_min, self.quant_max)
             elif self.qat_method == QatMethod.MOM:
                 abs_max = input.abs().max()
-                self.running_data.mul_(1-self.momentum).add_(self.momentum * abs_max)
+                self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
                 out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, abs_max.log2(), min_scale, self.quant_min, self.quant_max)
         else:
             out = BIASQUANT.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
@@ -183,7 +183,7 @@ class Quantizer(torch.nn.Module, ):
                 out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, self.learning_data, min_scale, self.quant_min, self.quant_max)
             elif self.qat_method == QatMethod.MOM:
                 abs_max = input.abs().max()
-                self.running_data.mul_(1-self.momentum).add_(self.momentum * abs_max)
+                self.running_data.mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
                 out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, abs_max.log2(), min_scale, self.quant_min, self.quant_max)
         else:
             out = BIASQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
@@ -262,7 +262,6 @@ class AQuantizer(Quantizer):
         self.quant_strategy = quantizer_cfg.get('a_strategy', QuantStrategy.RANGE_MEAN)
         self.activation_type = quantizer_cfg.get('activation_type', None)
         self.is_bias_quantizer = False
-        self.is_qtensor = False
         self.calibrate_name = quantizer_cfg.get('a_calibrate_name', "top_10")
         # self.quant_min = - 2 ** (self.data_bits - 1)
         # self.quant_max = 2 ** (self.data_bits - 1) - 1
@@ -288,6 +287,7 @@ class WQuantizer(Quantizer):
 
         self.register_buffer("is_init_mom_clamp_weight", torch.tensor(False, dtype=bool))
         self.round_mode = QuantMode.round
+
 class BQuantizer(Quantizer):
     def __init__(self, quantizer_cfg: Optional[Dict[str, Any]] = None, constrain: Optional[Dict[str, Any]] = None):
         super().__init__(quantizer_cfg, constrain)

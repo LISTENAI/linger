@@ -1,7 +1,33 @@
 import torch
+import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
+
+class QConv2dOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+        return F.conv2d(input, weights, bias, stride=stride, padding=padding, dilation=dilation, groups=groups)
+    @staticmethod
+    def symbolic(g, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weights]
+        else:
+            input_list = [input, weights]
+        if bias is not None:
+            input_list.append(bias)
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 @register_qmodule(torch.nn.Conv2d)
 class QConv2d(QModuleMixin, torch.nn.Conv2d):
@@ -33,6 +59,9 @@ class QConv2d(QModuleMixin, torch.nn.Conv2d):
             constrain = constrain, 
         )
 
-    def qforward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, False)
+            return QConv2dOnnxFunction.apply(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
         return self._conv_forward(input, self.qweight, self.qbias)
 

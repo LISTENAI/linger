@@ -11,10 +11,12 @@ from .qcat import QCat
 from .qsigmoid import QSigmoid
 from .qtanh import QTanh
 from .qsoftmax import QSoftmax
+from .qsqueeze import QSqueezeOnnxFunction
 from ..qconfig import *
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor, qfallback
 from ...quantizer import AQuantizer
 from ....config import QUANT_CONFIGS
+from ....onnx import generate_onnx_qparam_dict, QDOMAIN_NAME
 
 # @register_qtensor_op([torch.ops.aten.add, torch.ops.aten.add_])
 # @register_qtensor_op([torch.add, torch._C.TensorBase.add, torch._C.TensorBase.add_])
@@ -137,7 +139,7 @@ def cat(op, input, dim = 0):
     output = q_layer(input, dim)
     return output
 
-@register_qtensor_op([torch.ops.aten.reshape])
+@register_qtensor_op([torch.reshape, torch.Tensor.reshape])
 def reshape(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -148,7 +150,7 @@ def reshape(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.split])
+@register_qtensor_op([torch.split, torch.Tensor.split])
 def split(op, input, split_size_or_sections, dim: int = 0):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -164,7 +166,7 @@ def split(op, input, split_size_or_sections, dim: int = 0):
         # return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, split_size_or_sections, dim)
 
-@register_qtensor_op([torch.ops.aten.flip])
+@register_qtensor_op([torch.flip, torch.Tensor.flip])
 def flip(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -175,7 +177,7 @@ def flip(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.view, torch.ops.aten._unsafe_view])
+@register_qtensor_op([torch.Tensor.view])
 def view(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -186,7 +188,7 @@ def view(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.transpose])
+@register_qtensor_op([torch.transpose, torch.Tensor.transpose])
 def transpose(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -197,7 +199,7 @@ def transpose(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.permute])
+@register_qtensor_op([torch.permute, torch.Tensor.permute])
 def permute(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -241,18 +243,21 @@ def slice(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.squeeze])
+@register_qtensor_op([torch.squeeze, torch.Tensor.squeeze, torch.Tensor.squeeze_])
 def squeeze(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
         tmp_input = from_qtensor_to_tensor(input)
         scale = input.scale.detach()
         data_bits = input.data_bits
-        out = op(tmp_input, *size)
+        if torch.onnx.is_in_onnx_export():
+            out = QSqueezeOnnxFunction.apply(input, *size)
+        else:
+            out = op(tmp_input, *size)
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.unsqueeze])
+@register_qtensor_op([torch.unsqueeze, torch.Tensor.unsqueeze, torch.Tensor.unsqueeze_])
 def unsqueeze(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -263,7 +268,7 @@ def unsqueeze(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.flatten])
+@register_qtensor_op([torch.flatten, torch.Tensor.flatten])
 def flatten(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -285,7 +290,7 @@ def __getitem__(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
-@register_qtensor_op([torch.ops.aten.pad])
+@register_qtensor_op([torch.nn.functional.pad])
 def pad(op, input, pad, mode: str = ..., value: Optional[float] = None):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
@@ -370,3 +375,15 @@ def relu(op, input, *args, **kwargs):
         out = op(tmp_input, *args, **kwargs)
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *args, **kwargs)
+
+@register_qtensor_op([torch.topk, torch.Tensor.topk])
+def topk(op, input, *args, **kwargs):
+    assert isinstance(input, QTensor), 'input is not QTensor'
+    if isinstance(input, QTensor):
+        tmp_input = from_qtensor_to_tensor(input)
+        scale = input.scale.detach()
+        data_bits = input.data_bits
+        out = op(tmp_input, *args, **kwargs)
+        return from_tensor_to_qtensor(out, scale, data_bits)
+    return op(input, *args, **kwargs)
+

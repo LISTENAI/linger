@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
 
 @register_qmodule(nn.MaxPool1d)
@@ -41,7 +42,7 @@ class QMaxPool1d(QModuleMixin, nn.MaxPool1d):
             tmp_input = from_qtensor_to_tensor(input)
             scale = input.scale.detach()
             data_bits = input.data_bits
-            out =  F.max_pool2d(
+            out =  F.max_pool1d(
                 tmp_input,
                 self.kernel_size,
                 self.stride,
@@ -52,7 +53,7 @@ class QMaxPool1d(QModuleMixin, nn.MaxPool1d):
             )
             return from_tensor_to_qtensor(out, scale, data_bits)
         else:
-            return F.max_pool2d(
+            return F.max_pool1d(
                     input,
                     self.kernel_size,
                     self.stride,

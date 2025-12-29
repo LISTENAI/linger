@@ -42,12 +42,11 @@ class OnnxRunner:
     def _init_dump(self):
         if self._dump:
             if self._dump is True:
+                self.__dump_dir = "data"
                 self.__int_dump_path = "data/onnxrunner_int"
                 self.__float_dump_path = 'data/onnxrunner_float'
-            if os.path.exists(self.__int_dump_path):
-                os.system("rm -rf {}".format(self.__int_dump_path))
-            if os.path.exists(self.__float_dump_path):
-                os.system("rm -rf {}".format(self.__float_dump_path))
+            if os.path.exists(self.__dump_dir):
+                os.system("rm -rf {}".format(self.__dump_dir))
             Path(self.__int_dump_path).mkdir(parents=True)
             Path(self.__float_dump_path).mkdir(parents=True)
     
@@ -181,6 +180,7 @@ class OnnxRunner:
             for attr in node.attribute:
                 if attr.name == "platform":
                     platform = attr.s.decode('utf-8')
+                    break
 
         platform_map = {
             "venus": PlatForm.venus,
@@ -280,7 +280,7 @@ class OnnxRunner:
                             bits = flat_outputs[output_idx].data_bits
                             zp = 0 # TODO: zp = flat_outputs[output_idx]
                             if flat_outputs[output_idx].dtype == torch.float32 or flat_outputs[output_idx].dtype == torch.float64:
-                                q_output = quant(flat_outputs[output_idx], bits, scale, zp, round_mode)
+                                q_output, _ = quant(flat_outputs[output_idx], bits, scale, zp, round_mode)
                                 q_output = q_output.to(torch.int).detach().flatten().cpu().numpy()
                             else:
                                 q_output = flat_outputs[output_idx].detach().flatten().cpu().numpy()
@@ -349,11 +349,10 @@ class OnnxRunner:
                 model_output[special_key] =  ops_outputs
         
         for output in self._model.graph.output:
-            # print(output.name)
             if out_type == "dict":
-                model_output[output.name] = self.__tensor_dict[output.name]
+                model_output[output.name] = self.__tensor_dict[output.name].detach()
             else:
-                model_output.append(self.__tensor_dict[output.name])
+                model_output.append(self.__tensor_dict[output.name].detach())
 
         return model_output
     

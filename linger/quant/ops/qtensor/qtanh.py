@@ -9,8 +9,25 @@ from .qtensor_mod import QModuleTensor
 from ..qconfig import register_qmodule
 from ....config import QUANT_CONFIGS
 from ....utils import PlatForm
+from ....onnx import generate_onnx_qparam_dict, QDOMAIN_NAME
 
 import lingerext
+
+class QTanhOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, qparam_dict = None):
+        return torch.tanh(x)
+    @staticmethod
+    def symbolic(g, input, dim, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        input_list = [input]
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 class QTanhFunction(torch.autograd.Function):
     @staticmethod
@@ -71,8 +88,11 @@ class QTanh(QModuleTensor):
             num_input = num_input
         )
     
-    def qforward(self, x, *args, **kwargs):
-        if QUANT_CONFIGS.calibration:
+    def forward(self, x, *args, **kwargs):
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, True)
+            return QTanhOnnxFunction.apply(x, qparam_dict)
+        elif QUANT_CONFIGS.calibration:
             return torch.tanh(x)
         else:
             if isinstance(self.input_quantizer, nn.ModuleList):

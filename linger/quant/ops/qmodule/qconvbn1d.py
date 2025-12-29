@@ -5,7 +5,31 @@ from typing import Optional, Union, Dict, Any
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ....constrain import CConvBN1d, ConvBN1d
-from ....onnx import generate_onnx_qparam_dict, QCustomOpSymbolic
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+
+class QConvBN1dOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+        return F.conv1d(input, weights, bias, stride=stride, padding=padding, dilation=dilation, groups=groups)
+    @staticmethod
+    def symbolic(g,  input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weights]
+        else:
+            input_list = [input, weights]
+        if bias is not None:
+            input_list.append(bias)
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
 
 @register_qmodule(ConvBN1d)
 @register_qmodule(CConvBN1d)
@@ -120,10 +144,10 @@ class QConvBN1d(QModuleMixin, CConvBN1d):
             self.bias.data = new_bias            
             if torch.onnx.is_in_onnx_export():
                 qparam_dict = generate_onnx_qparam_dict(self, False)
-                output = QCustomOpSymbolic.apply(input, self.weight, self.bias, qparam_dict, self.input_quantizer.is_qtensor)
+                return QConvBN1dOnnxFunction.apply(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
             else:
                 output = F.conv1d(input, self.qweight, self.qbias, self.stride,
-                              self.padding, self.dilation, self.groups)
+                            self.padding, self.dilation, self.groups)
         
         return output
 

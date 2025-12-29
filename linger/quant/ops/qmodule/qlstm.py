@@ -14,6 +14,7 @@ from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ....config import QUANT_CONFIGS
 from ....utils import _unbind, _unbind_packed, _slice, hx_slice, QatMethod, PlatForm
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 import lingerext
 
@@ -39,7 +40,7 @@ class QLSTMSigmoidFunction(torch.autograd.Function):
         if QUANT_CONFIGS.platform == PlatForm.venus:
             output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
         elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-            output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
+            output_q31 = lingerext.arcs_qsigmoid_forward(i_q27.contiguous())
         elif QUANT_CONFIGS.platform == PlatForm.venusA:
             output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
 
@@ -94,6 +95,82 @@ class QLSTMTanhFunction(torch.autograd.Function):
 
         return gradInput
 
+class QLSTMOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, hidden_state, cell_state, weight_ih, weight_hh, bias_ih, bias_hh,
+                weight_ih_reverse, weight_hh_reverse, bias_ih_reverse, bias_hh_reverse,
+                hidden_size, num_layers, batch_first, bidirectional, qparam_dict = None):
+        output = None
+        hidden_state = None
+        cell_state = None
+        batch_size = None
+        seq_length = None
+        num_directions = 2 if bidirectional else 1
+        if batch_first:
+            batch_size = input.size(0)
+            seq_length = input.size(1)
+            output = torch.randn(batch_size, seq_length, hidden_size*num_directions, device=input.device)
+        else:
+            batch_size = input.size(1)
+            seq_length = input.size(0)
+            output = torch.randn(seq_length, batch_size, hidden_size*num_directions, device=input.device)
+        hidden_state = torch.zeros(num_directions, batch_size, hidden_size, device=input.device)
+        cell_state = torch.zeros(num_directions, batch_size, hidden_size, device=input.device)
+        return output, hidden_state, cell_state
+
+    @staticmethod
+    def symbolic(g, input, hidden_state, cell_state, weight_ih, weight_hh, bias_ih, bias_hh,
+                weight_ih_reverse, weight_hh_reverse, bias_ih_reverse, bias_hh_reverse,
+                hidden_size, num_layers, batch_first, bidirectional, qparam_dict = None):
+
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+
+        qparam_dict_r = qparam_dict.get("qparam_dict_r", None)
+        qparam_dict.pop('qparam_dict_r', None)
+
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weight_ih, weight_hh]
+        else:
+            input_list = [input, weight_ih, weight_hh]
+        if bias_ih is not None:
+            input_list.append(bias_ih)
+            input_list.append(bias_hh)
+        lstm, hidden, cell = g.op(node_name, *input_list, **qparam_dict)
+
+        if qparam_dict_r is not None:   # 双向RNN
+            if is_input_qtensor is False or is_input_qtensor is None:
+                op_inner = quantlinear(g, input, qparam_dict_r['scale_x_f'], qparam_dict_r['platform_s'], qparam_dict_r['x_bits_i'], 0)
+                input_list_r = [op_inner, weight_ih_reverse, weight_hh_reverse]
+            else:
+                input_list_r = [input, weight_ih_reverse, weight_hh_reverse]
+            if bias_ih_reverse is not None:
+                input_list_r.append(bias_ih_reverse)
+                input_list_r.append(bias_hh_reverse)
+            lstm_r, hidden_r, cell_r = g.op(node_name, *input_list_r, **qparam_dict_r)
+
+            # 双向LSTM需要插入QCat
+            cat_node_name = f"{QDOMAIN_NAME}::QCat"
+            cat_input_list = [lstm, lstm_r]
+            cat_param_dict = {}
+            cat_param_dict['platform_s'] = qparam_dict.get("platform_s", None)
+            cat_param_dict['quant_mode_s'] = qparam_dict.get("quant_mode_s", None)
+            cat_param_dict['axis_i'] = int(2)
+            cat_param_dict['x_0_bits_i'] = qparam_dict.get("o_bits_i", 8)
+            cat_param_dict['scale_x_0_f'] = qparam_dict.get("scale_o_f", 1.0)
+            cat_param_dict['x_1_bits_i'] = qparam_dict_r.get("o_bits_i", 8)
+            cat_param_dict['scale_x_1_f'] = qparam_dict_r.get("scale_o_f", 1.0)
+            cat_param_dict['o_bits_i'] = qparam_dict.get("o_bits_i", 8)
+            cat_param_dict['scale_o_f'] = min(qparam_dict_r.get("scale_o_f", 1.0), qparam_dict.get("scale_o_f", 1.0))
+            lstm = g.op(cat_node_name, *cat_input_list, **cat_param_dict)
+            hidden = g.op("Concat", hidden, hidden_r, axis_i=0)
+            cell = g.op("Concat", cell, cell_r, axis_i=0)
+
+        return lstm, hidden, cell
 
 class QLSTMCell(nn.Module):
     def forward(self, input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh, training,
@@ -117,14 +194,19 @@ class QLSTMCell(nn.Module):
         # sigmoid和tanh结果均为Q15伪量化之后结果，已经包含舍入操作
 
         # fake_quant cx
-        scale_cell = torch.tensor(2**15, dtype=torch.float32)
-        new_cx = cell_quantizer(cx, scale_cell)
-        cy1 = new_cx * forgetgate
-        cy2 = ingate * cellgate
+        scale_cell_15 = torch.tensor(2**15, dtype=torch.float32)
+        scale_cell_27 = torch.tensor(2**27, dtype=torch.float32)
+        new_cx = cell_quantizer(cx, scale_cell_15)
+        cy1 = new_cx.double() * forgetgate.double()
+        cy2 = ingate.double() * cellgate.double()
+        cy1 = ((cy1 * (2**30)).long().clamp(-2**31, 2**31-1)).double() / (2**30)
+        cy2 = ((cy2 * (2**30)).long().clamp(-2**31, 2**31-1)).double() / (2**30)
         cy = cy1 + cy2
         hy = QLSTMTanhFunction.apply(cy)    #包含一次舍入
-        hy = hy * outgate
-        cy = cell_quantizer(cy, scale_cell)
+        hy = hy.double() * outgate.double()
+        cy = cell_quantizer(cy, scale_cell_27)   # cy需要2次舍入
+        # cy_q27_fake = (cy * (2**27) + 0.5).floor() / (2**27)   # cy需要2次舍入
+        # cy = cell_quantizer(cy_q27_fake, scale_cell_15)
 
         return hy, cy
         
@@ -235,6 +317,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
     def quantize_lstm_input(self, input: torch.Tensor) -> torch.Tensor:
         if isinstance(input, QTensor):
             fake_input = from_qtensor_to_tensor(input)
+            self.input_quantizer.is_qtensor = True
             self.input_quantizer.scale.fill_(input.scale.detach())
             self.input_quantizer.data_bits = input.data_bits
         else:
@@ -246,7 +329,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
             fake_hidden = self.hidden_reverse_quantizer(hidden, scale)
         else:
             fake_hidden = self.hidden_quantizer(hidden, scale)
-        return fake_hidden
+        return fake_hidden.float()
     
     def quantize_lstm_out(self, input: torch.Tensor, direct) -> torch.Tensor:
         if direct:
@@ -256,13 +339,61 @@ class QLSTM(QModuleMixin, nn.LSTM):
         return fake_out
         # return from_tensor_to_qtensor(fake_out, self.output_quantizer.scale, self.output_quantizer.data_bits)
     
-    def qforward(self, input, *args, **kwargs):
+    def update_output_quantizer_running_data(self, direct):
+        if direct:
+            self.output_reverse_quantizer.running_data.fill_(float(self.hidden_reverse_quantizer.running_data))
+        else:
+            self.output_quantizer.running_data.fill_(float(self.hidden_quantizer.running_data))
+    
+    def forward(self, input, *args, **kwargs):
         hx = None if len(args) == 0 else args[0]
-        if QUANT_CONFIGS.calibration:
+        if torch.onnx.is_in_onnx_export():
+            return self.forward_onnx_export(input, hx)
+        elif QUANT_CONFIGS.calibration:
             return self.forward_calibrate(input, hx)
         else:
             return self.forward_train(input, hx)
 
+    def forward_onnx_export(self, input, hx=None):
+        orig_input = input
+        lengths = None
+        if isinstance(orig_input, tuple):
+            input, lengths, _, _ = orig_input
+        else:
+            lengths = None
+
+        input = self.quantize_lstm_input(input)
+
+        if hx is not None:
+            hidden_state, cell_state = hx
+        else:
+            hidden_state = None
+            cell_state = None
+
+        output = None; hy = None; cy = None
+        if hx is not None:
+            batch_size = input.size(0) if self.batch_first else input.size(1)
+            seq_len = input.size(1) if self.batch_first else input.size(0)
+            lengths = torch.tensor([seq_len for i in range(batch_size)], dtype=torch.int64, device=input.device) if lengths is None else lengths
+
+        qparam_dict = generate_onnx_qparam_dict(self, False)
+        if self.bidirectional:
+            output, hy, cy = QLSTMOnnxFunction.apply(input, hidden_state, cell_state, 
+                                self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0, 
+                                self.weight_ih_l0_reverse, self.weight_hh_l0_reverse, self.bias_ih_l0_reverse, self.bias_hh_l0_reverse,
+                                self.hidden_size, self.num_layers, self.batch_first, self.bidirectional, qparam_dict)
+        else:
+            output, hy, cy = QLSTMOnnxFunction.apply(input, hidden_state, cell_state, 
+                                self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0, 
+                                None, None, None, None,
+                                self.hidden_size, self.num_layers, self.batch_first, self.bidirectional, qparam_dict)
+
+        output = from_tensor_to_qtensor(output, self.output_quantizer.scale, self.output_quantizer.data_bits)
+
+        if isinstance(orig_input, tuple):
+            return (output, lengths), (hy, cy)
+        else:
+            return output, (hy, cy)
 
     def forward_calibrate(self, input, hx=None):
         with torch.no_grad():
@@ -317,7 +448,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
             output = self.quantize_lstm_out(output, 0)
 
             if self.bidirectional:
-                input_r = input.flip(0)
+                input_r = input.flip(1) if self.batch_first else input.flip(0)
                 w_ih_r, w_hh_r = self.qweight_ih_hh_reverse
                 b_ih_r, b_hh_r = self.qbias_ih_hh_reverse
                 output_r, hidden_r = torch.ops.aten.lstm(
@@ -381,9 +512,10 @@ class QLSTM(QModuleMixin, nn.LSTM):
             num_directions = 2 if self.bidirectional else 1
             zeros = torch.zeros(self.num_layers * num_directions, max_batch_size, self.hidden_size, dtype=input.dtype, device=input.device)
             hx = (zeros, zeros)
-            self.quantize_lstm_hidden(hx[0][0], 0, self.input_quantizer.scale)  # init hidden_quantizer
+            hidden_init_scale = self.input_quantizer.scale if self.training else None
+            self.quantize_lstm_hidden(hx[0][0], 0, hidden_init_scale)  # init hidden_quantizer
             if self.bidirectional:
-                self.quantize_lstm_hidden(hx[0][1], 1, self.input_quantizer.scale)
+                self.quantize_lstm_hidden(hx[0][1], 1, hidden_init_scale)
         else:
             # Each batch of the hidden state should match the input sequence that
             # the user believes he/she is passing in.
@@ -491,7 +623,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
                                         biasih_quantizer, biashh_quantizer, cell_quantizer)
                 hidden = self.quantize_lstm_hidden(hidden, direct)   #hidden fake_quant
-
+                self.update_output_quantizer_running_data(direct)
                 step_outputs.append(hidden)
         
             step_outputs = step_outputs[::-1] if direct == 1 else step_outputs
@@ -513,6 +645,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
                                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
                                                         biasih_quantizer, biashh_quantizer, cell_quantizer)
                 hidden = self.quantize_lstm_hidden(hidden, direct)   #hidden fake_quant
+                self.update_output_quantizer_running_data(direct)
                 step_outputs.append(hidden)
                 last_batch_size = batch_len
             final_hiddens.append((hidden, cell_state))
@@ -538,17 +671,19 @@ class QLSTM(QModuleMixin, nn.LSTM):
             for input_i,batch_len in zip(input, batch_size_list):
                 if last_batch_size != batch_len:
                     #获取input_hx高位hidden部分与上一帧的hidden进行填充，相当于补0
-                    hidden, cell_state = hx_slice(input_hx, (hidden, cell_state), last_batch_size, batch_len)           
+                    hidden, cell_state = hx_slice(input_hx, (hidden, cell_state), last_batch_size, batch_len)
                 hidden, cell_state = self.qlstm_cell_func(input_i, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
                                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
                                                         biasih_quantizer, biashh_quantizer, cell_quantizer)
                 hidden = self.quantize_lstm_hidden(hidden, direct)   #hidden fake_quant
+                self.update_output_quantizer_running_data(direct)
                 step_outputs.append(hidden)
                 last_batch_size = batch_len
             
             step_outputs = step_outputs[::-1] 
             output = torch.cat(step_outputs, 0)
 
+        hidden = self.quantize_lstm_hidden(output, direct)  # keep scale_h equal scale_o
         output = self.quantize_lstm_out(output, direct)
         return output, (hidden, cell_state)
     

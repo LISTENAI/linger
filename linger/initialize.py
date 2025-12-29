@@ -144,7 +144,7 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
                                 # iq_layer = iq_layer.to(device)
                                 setattr(module, input_name, iq_layer)
                             elif '_qsoftmax_' in input_name:
-                                iq_layer = QSoftmax(activate_config=activate_cfg, num_input=2)
+                                iq_layer = QSoftmax(activate_config=activate_cfg, num_input=1)
                                 iq_layer.training = model.training
                                 # iq_layer = iq_layer.to(device)
                                 setattr(module, input_name, iq_layer)

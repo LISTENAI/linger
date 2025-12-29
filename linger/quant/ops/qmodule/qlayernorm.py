@@ -9,8 +9,35 @@ from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ....config import QUANT_CONFIGS
+from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 import lingerext
+
+class QLayerNormOnnxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, normalized_shape, weight, bias, eps, qparam_dict=None):
+        return F.layer_norm(input, normalized_shape, weight, bias, eps)
+        
+    @staticmethod
+    def symbolic(g,  input, normalized_shape, weight, bias, eps, qparam_dict=None):
+        op_type = qparam_dict.get("op_type", "QGeneric")
+        is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        node_name = f"{QDOMAIN_NAME}::{op_type}"
+        qparam_dict.pop('op_type', None)
+        qparam_dict.pop('is_input_qtensor', None)
+        if is_input_qtensor is False or is_input_qtensor is None:
+            op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            input_list = [op_inner, weight]
+        else:
+            input_list = [input, weight]
+        if bias is not None:
+            input_list.append(bias)
+        return g.op(
+                node_name,
+                *input_list,
+                **qparam_dict
+            )
+
 
 class QLayerNormFunction(torch.autograd.Function):
     """QLayerNormFunction
@@ -126,7 +153,10 @@ class QLayerNorm(QModuleMixin, nn.LayerNorm):
             constrain = constrain
         )
 
-    def qforward(self, input):
+    def forward(self, input):
+        if torch.onnx.is_in_onnx_export():
+            qparam_dict = generate_onnx_qparam_dict(self, False)
+            return QLayerNormOnnxFunction.apply(input, self.normalized_shape, self.qweight, self.qbias, self.eps, qparam_dict)
         if QUANT_CONFIGS.calibration:
             return F.layer_norm(input, self.normalized_shape, self.qweight, self.qbias, self.eps)
         else:
