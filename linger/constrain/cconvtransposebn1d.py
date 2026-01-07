@@ -8,13 +8,14 @@ from typing import Optional, Union, Dict, Any
 from .cmodule import CModuleMixin, register_cmodule
 from .cutils import static_clip, dyn_clip_weight
 
-class ConvBN1d(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
+class ConvTransposeBN1d(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size, stride=1, padding=0, 
+                 output_padding=0, groups=1, bias=True, dilation=1, padding_mode="zeros",
                  eps=1e-5, momentum=0.1, affine=True, track_running_stats=True,
                  constrain: Optional[Dict[str, Any]] = None, dtype = torch.float32) -> None:
-        super(ConvBN1d, self).__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size,
-                              stride, padding, dilation, groups, bias, padding_mode)
+        super(ConvTransposeBN1d, self).__init__()
+        self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size,
+                              stride, padding, output_padding, groups, bias, dilation, padding_mode)
         self.bn = nn.BatchNorm1d(
             out_channels, eps, momentum, affine, track_running_stats)
 
@@ -25,9 +26,9 @@ class ConvBN1d(nn.Module):
         self.clamp_factor = self.constrain.get('clamp_factor_value', None)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-    
         if self.training:
-            conv_rlt = self.conv._conv_forward(input, self.conv.weight, self.conv.bias) # for calculate bn mean and var
+            conv_rlt = F.conv_transpose1d(input, self.conv.weight, self.conv.bias, self.conv.stride, self.conv.padding, 
+                                            self.conv.output_padding, self.conv.groups, self.conv.dilation,)
             N, C, H = conv_rlt.size()
             bn_size = N * H
             conv_rlt = conv_rlt.permute(1, 0, 2).contiguous().view(C, bn_size)
@@ -49,14 +50,13 @@ class ConvBN1d(nn.Module):
                         self.bn.weight.unsqueeze(1) + self.bn.bias.unsqueeze(1))
             bn_rlt = bn_rlt.view(C, N, H).permute(1, 0, 2).contiguous()
             w_bn_ = self.bn.weight.div(torch.sqrt(unbias_var_ + self.bn.eps))
-            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1)) # 与conv1d作用维度不同
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:
-                b_conv_ = torch.zeros(self.conv.weight.size(0), device=input.device)
+                b_conv_ = torch.zeros(self.conv.weight.size(1), device=input.device)
             b_bn_ = self.bn.bias - self.bn.weight.mul(mean_).div(torch.sqrt(unbias_var_ + self.bn.eps))
             new_bias = b_conv_.mul(w_bn_) + b_bn_
-
             alpha = 0.1
             if self.clamp_weight is not None:
                 new_weight = static_clip(new_weight, self.clamp_weight)
@@ -65,16 +65,16 @@ class ConvBN1d(nn.Module):
 
             if self.clamp_bias is not None:
                 new_bias = static_clip(new_bias, self.clamp_bias)
-            new_conv_rlt = F.conv1d(input, new_weight, new_bias, self.conv.stride,
-                                    self.conv.padding, self.conv.dilation, self.conv.groups)
+            new_conv_rlt = F.conv_transpose1d(input, new_weight, new_bias, self.conv.stride, self.conv.padding, 
+                                            self.conv.output_padding, self.conv.groups, self.conv.dilation,)
             output = alpha * bn_rlt + (1 - alpha) * new_conv_rlt
         else:
             w_bn_ = self.bn.weight.div(torch.sqrt(self.bn.eps + self.bn.running_var))
-            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1)) # 与conv1d作用维度不同
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:
-                b_conv_ = torch.zeros(self.conv.weight.size(0), device=input.device)
+                b_conv_ = torch.zeros(self.conv.weight.size(1), device=input.device)
             b_bn_ = self.bn.bias - self.bn.weight.mul(self.bn.running_mean).div(
                 torch.sqrt(self.bn.running_var + self.bn.eps))
             new_bias = b_conv_.mul(w_bn_) + b_bn_
@@ -85,29 +85,31 @@ class ConvBN1d(nn.Module):
 
             if self.clamp_bias is not None:
                 new_bias = static_clip(new_bias, self.clamp_bias)
-            output = F.conv1d(input, new_weight, new_bias, self.conv.stride,
-                              self.conv.padding, self.conv.dilation, self.conv.groups)
-        
+            # import pdb; pdb.set_trace()
+            output = F.conv_transpose1d(input, new_weight, new_bias, self.conv.stride, self.conv.padding, 
+                                            self.conv.output_padding, self.conv.groups, self.conv.dilation)
+
         if self.clamp_activation is not None:
             output = static_clip(output, self.clamp_activation)
 
         return output
 
-@register_cmodule(ConvBN1d)
-class CConvBN1d(CModuleMixin, ConvBN1d):
+@register_cmodule(ConvTransposeBN1d)
+class CConvTransposeBN1d(CModuleMixin, ConvTransposeBN1d):
     @classmethod
     def ccreate(
         cls,
         module,
         constrain: Optional[Dict[str, Any]] = None,
         device: Optional[Dict[str, Any]] = None,
-    ):
+    ):    
         return cls(
             in_channels=module.conv.in_channels,
             out_channels=module.conv.out_channels,
             kernel_size=module.conv.kernel_size,
             stride=module.conv.stride,
             padding=module.conv.padding,
+            output_padding=module.conv.output_padding,
             dilation=module.conv.dilation,
             groups=module.conv.groups,
             bias=module.conv.bias is not None,
@@ -125,7 +127,7 @@ class CConvBN1d(CModuleMixin, ConvBN1d):
         )
     
     def extra_repr(self):
-        s = nn.Conv1d.extra_repr(self.conv)
+        s = nn.ConvTranspose1d.extra_repr(self.conv)
         s += ', '
         s += nn.BatchNorm1d.extra_repr(self.bn)
         extra_s = ', clamp_activation:{}, clamp_weight:{}, clamp_bias:{}, clamp_factor:{}'.format(self.clamp_activation, self.clamp_weight, self.clamp_bias, self.clamp_factor)

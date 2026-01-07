@@ -1,7 +1,7 @@
 import torch.nn.functional as F
 import torch
 from linger.quant.ops import *
-from linger.checker.utils import get_param,register_op
+from .utils import get_param,register_op
 from linger.config import QUANT_CONFIGS
 import numpy as np
 import linger
@@ -248,17 +248,19 @@ def iqmul(inputs, kwargs):
     if isinstance(x, QTensor) and isinstance(y, QTensor):
         qx, qy = x, y
     elif isinstance(x, QTensor) and (not isinstance(y, QTensor)):
-        qx = dequant(x, scale_x)
-        qy = y
-    elif (not isinstance(x, QTensor)) and isinstance(y, QTensor):
         qx = x
         qy = dequant(y, scale_y)
+    elif (not isinstance(x, QTensor)) and isinstance(y, QTensor):
+        qx = dequant(x, scale_x)
+        qy = y
     else:
         qx = dequant(x, scale_x)
         qy = dequant(y, scale_y)
-        
+
     instance = create_qmodule_tensor(QMul, None, 2, kwargs)
-    return instance(qx, qy)
+    res = instance(qx, qy)
+    
+    return res
 
 @register_op(op_type='Relu')
 def relu(inputs, kwargs):
@@ -332,11 +334,17 @@ def convTranspose2dInt(inputs, kwargs):
         pads = tuple(pads[0:2])
     else:
         pads = (0, 0)
+    output_padding = kwargs.get('output_padding', None)
+    if output_padding is not None:
+        output_padding = tuple(output_padding[0:2])
+    else:
+        output_padding = (0, 0)
     dilations = tuple(kwargs.get('dilations', (1, 1)))
     group = kwargs.get('group', 1)
     device = input.device
 
-    module = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_shape, strides, pads, dilations, group).to(device)
+    module = torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_shape, strides,
+                                      padding=pads, output_padding=output_padding, groups=group, bias=bias!=None).to(device)
     
     instance = create_qmodule(QConvTranspose2d, module, device, kwargs)
     if weights.dtype != torch.float32:
@@ -380,7 +388,7 @@ def batchnorm2dInt(inputs, kwargs):
 
     return instance(input)
 
-@register_op(op_type="GRUInt")
+@register_op(op_type=["GRUInt", "QGRU"])
 def gruint(inputs, kwargs):
     inputs_len = len(inputs)
     assert inputs_len == 5, f'GRUInt/QGRU input numbuder {inputs_len} is invalid.'
@@ -420,9 +428,21 @@ def lstmint(inputs, kwargs):
     elif inputs_len == 8:
         input, seq_lens, h0, c0, weight_ih, weight_hh, bias_ih, bias_hh = inputs
 
-    device = input.device
     batch_first = kwargs.get('batch_first', 1)
     batch_first = True if batch_first else False
+    if kwargs['go_forward'] == 0:
+        input = torch.flip(input, dims=[1])
+
+    if seq_lens is not None:
+            unpacked_input = (input, seq_lens, batch_first, False)
+    else:
+        unpacked_input = input
+
+    hc = None
+    if h0 is not None and c0 is not None:
+        hc = (h0, c0)
+
+    device = input.device
     kwargs = canonicalize_attrs(kwargs)
 
     module = nn.LSTM(input_size=kwargs.get("input_size", None), hidden_size = kwargs.get("hidden_size", None),
@@ -432,13 +452,21 @@ def lstmint(inputs, kwargs):
     instance = create_rnn_module(QLSTM, module, device, kwargs)
     instance = load_rnn_quantized_weights(instance, kwargs, weight_ih, weight_hh, bias_ih, bias_hh)
 
-    if kwargs['go_forward'] == 1:  
-        return instance(input)
+    if kwargs['go_forward'] == 1:
+        res = instance(unpacked_input, hc)
+        if isinstance(res[0], tuple):
+            output, _ = res[0]
+        else:
+            output = res[0]
+        return output, res[1]
     else:
-        reversed_input = torch.flip(input, dims=[1])
-        out = instance(reversed_input)
-        out_0 = torch.flip(out[0], dims=[1])
-        return tuple([out_0, out[1]])
+        res = instance(unpacked_input, hc)
+        if isinstance(res[0], tuple):
+            output, _ = res[0]
+        else:
+            output = res[0]
+        output = torch.flip(output, dims=[1])
+        return output, res[1]
     
 
 @register_op(op_type=['QSigmoid', 'iqSigmoid'])

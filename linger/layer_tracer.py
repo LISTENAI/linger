@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from .utils import Singleton, ActivationType, get_device
-from .constrain import ConvBN1d, ConvBN2d
+from .constrain import ConvBN1d, ConvBN2d, ConvTransposeBN1d, ConvTransposeBN2d
 from .config import QUANT_CONFIGS
 
 LINGER_IGNORE_PAMAMTER = "_linger_ignore_parameter"
@@ -102,11 +102,16 @@ class SingletonConvFusedBnModules(Singleton):
                                                        padding=conv_m.padding, dilation=conv_m.dilation, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
                                                        eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
                                                        constrain=None)
-                    # elif type(conv_m) == torch.nn.ConvTranspose2d:
-                    #     clamp_conv = CConvBN2d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
-                    #                                    padding=conv_m.padding, dilation=conv_m.dilation, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
-                    #                                    eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
-                    #                                    constrain=None)
+                    elif type(conv_m) == torch.nn.ConvTranspose1d:
+                        clamp_conv = ConvTransposeBN1d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
+                                                       padding=conv_m.padding, output_padding=conv_m.output_padding, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
+                                                       eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
+                                                       constrain=None)
+                    elif type(conv_m) == torch.nn.ConvTranspose2d:
+                        clamp_conv = ConvTransposeBN2d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
+                                                       padding=conv_m.padding, output_padding=conv_m.output_padding, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
+                                                       eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
+                                                       constrain=None)
                     setattr(clamp_conv, LINGER_ACTIVATION_TYPE, activation_type)
                     clamp_conv = clamp_conv.to(device)
                     setattr(find_fused_info.conv_f, node_name, clamp_conv)

@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: linger
+Version: 3.0.3
+Summary: linger is package of fix training
+Author: ListenAI
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Developers and Researchers
+Classifier: License :: OSI Approved :: iflytek internal License
+Classifier: Programming Language :: python
+License-File: LICENSE
+Dynamic: author
+Dynamic: classifier
+Dynamic: license-file
+Dynamic: summary

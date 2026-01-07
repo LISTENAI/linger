@@ -167,15 +167,16 @@ def split(op, input, split_size_or_sections, dim: int = 0):
     return op(input, split_size_or_sections, dim)
 
 @register_qtensor_op([torch.flip, torch.Tensor.flip])
-def flip(op, input, *size):
+def flip(op, input, *args, **kwargs):
     assert isinstance(input, QTensor), 'input is not QTensor'
+    
     if isinstance(input, QTensor):
         tmp_input = from_qtensor_to_tensor(input)
         scale = input.scale.detach()
         data_bits = input.data_bits
-        out = op(tmp_input, *size)
+        out = op(tmp_input, *args, **kwargs)
         return from_tensor_to_qtensor(out, scale, data_bits)
-    return op(input, *size)
+    return op(input, *args, **kwargs)
 
 @register_qtensor_op([torch.Tensor.view])
 def view(op, input, *size):
@@ -251,7 +252,7 @@ def squeeze(op, input, *size):
         scale = input.scale.detach()
         data_bits = input.data_bits
         if torch.onnx.is_in_onnx_export():
-            out = QSqueezeOnnxFunction.apply(input, *size)
+            out = QSqueezeOnnxFunction.apply(tmp_input, *size)
         else:
             out = op(tmp_input, *size)
         return from_tensor_to_qtensor(out, scale, data_bits)

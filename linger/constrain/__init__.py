@@ -7,6 +7,9 @@ from .cconvbn2d import *
 from .cbatchnorm2d import *
 from .cconvtranspose1d import *
 from .cconvtranspose2d import *
+from .cconvtransposebn1d import *
+from .cconvtransposebn2d import *
 from .clayernorm import *
 from .cembedding import *
 from .SparifyFFN import *
+from .clstm import *

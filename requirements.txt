@@ -1,8 +1,10 @@
 #python==3.10.0
-onnx==1.13.1
 torch==2.0.0
 torchaudio==2.0.1
 torchvision==0.15.1
+onnx==1.13.1
 protobuf==3.20.3
 numpy==1.23.5
 PyYAML==6.0.3
+cffi==1.15.1
+packaging==25.0

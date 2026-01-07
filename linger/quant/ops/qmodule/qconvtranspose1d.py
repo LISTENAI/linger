@@ -64,7 +64,7 @@ class QConvTranspose1d(QModuleMixin, torch.nn.ConvTranspose1d):
     def forward(self, input: torch.Tensor, output_size: Optional[List[int]] = None) -> torch.Tensor:
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
-            return QConvTranspose1dOnnxFunction.apply(input, self.weight, self.bias, self.stride, self.padding, self.output_padding, self.groups, self.dilation, qparam_dict)
+            return QConvTranspose1dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.output_padding, self.groups, self.dilation, qparam_dict)
         return F.conv_transpose1d(
             input, 
             self.qweight, 

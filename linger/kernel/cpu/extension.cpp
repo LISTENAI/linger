@@ -18,6 +18,20 @@ void find_table(torch::Tensor value, torch::Tensor table, torch::Tensor table_in
     }
 }
 
+torch::Tensor venus_qsigmoid_cpu(torch::Tensor a);
+torch::Tensor venus_qsigmoid_gpu(torch::Tensor a);
+torch::Tensor venus_qsigmoid_forward(torch::Tensor a)
+{
+    if (a.device().type() == torch::kCUDA)
+    {
+        return venus_qsigmoid_gpu(a);
+    }
+    else
+    {
+        return venus_qsigmoid_cpu(a);
+    }
+}
+
 torch::Tensor venusa_qsigmoid_cpu(torch::Tensor a);
 torch::Tensor venusa_qsigmoid_gpu(torch::Tensor a);
 torch::Tensor venusa_qsigmoid_forward(torch::Tensor a)
@@ -43,6 +57,20 @@ torch::Tensor arcs_qsigmoid_forward(torch::Tensor a)
     else
     {
         return arcs_qsigmoid_cpu(a);
+    }
+}
+
+torch::Tensor venus_qtanh_cpu(torch::Tensor a);
+torch::Tensor venus_qtanh_gpu(torch::Tensor a);
+torch::Tensor venus_qtanh_forward(torch::Tensor a)
+{
+    if (a.device().type() == torch::kCUDA)
+    {
+        return venus_qtanh_gpu(a);
+    }
+    else
+    {
+        return venus_qtanh_cpu(a);
     }
 }
 
@@ -74,17 +102,17 @@ torch::Tensor arcs_qtanh_forward(torch::Tensor a)
     }
 }
 
-torch::Tensor arcs_qsoftmax_cpu(const torch::Tensor& in, int64_t dim);
-torch::Tensor arcs_qsoftmax_gpu(const torch::Tensor& in, int64_t dim);
-torch::Tensor arcs_qsoftmax_forward(const torch::Tensor& in, int64_t dim)
+torch::Tensor venus_qsoftmax_cpu(const torch::Tensor& in, int64_t dim);
+torch::Tensor venus_qsoftmax_gpu(const torch::Tensor& in, int64_t dim);
+torch::Tensor venus_qsoftmax_forward(const torch::Tensor& in, int64_t dim)
 {
     if (in.device().type() == torch::kCUDA)
     {
-        return arcs_qsoftmax_gpu(in, dim);
+        return venus_qsoftmax_gpu(in, dim);
     }
     else
     {
-        return arcs_qsoftmax_cpu(in, dim);
+        return venus_qsoftmax_cpu(in, dim);
     }
 }
 
@@ -99,6 +127,20 @@ torch::Tensor venusa_qsoftmax_forward(const torch::Tensor& in, int64_t dim)
     else
     {
         return venusa_qsoftmax_cpu(in, dim);
+    }
+}
+
+torch::Tensor arcs_qsoftmax_cpu(const torch::Tensor& in, int64_t dim);
+torch::Tensor arcs_qsoftmax_gpu(const torch::Tensor& in, int64_t dim);
+torch::Tensor arcs_qsoftmax_forward(const torch::Tensor& in, int64_t dim)
+{
+    if (in.device().type() == torch::kCUDA)
+    {
+        return arcs_qsoftmax_gpu(in, dim);
+    }
+    else
+    {
+        return arcs_qsoftmax_cpu(in, dim);
     }
 }
 
@@ -199,10 +241,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_with_grad_sca
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("find_table", &find_table, "find_table(CPU/GPU)");
-    m.def("arcs_qsoftmax_forward", &arcs_qsoftmax_forward, "arcs_qsoftmax_forward(CPU/GPU)");
+    m.def("venus_qsoftmax_forward", &venus_qsoftmax_forward, "venus_qsoftmax_forward(CPU/GPU)");
     m.def("venusa_qsoftmax_forward", &venusa_qsoftmax_forward, "venusa_qsoftmax_forward(CPU/GPU)");
+    m.def("arcs_qsoftmax_forward", &arcs_qsoftmax_forward, "arcs_qsoftmax_forward(CPU/GPU)");
+    m.def("venus_qsigmoid_forward", &venus_qsigmoid_forward, "venus_qsigmoid_forward(CPU/GPU)");
     m.def("venusa_qsigmoid_forward", &venusa_qsigmoid_forward, "venusa_qsigmoid_forward(CPU/GPU)");
     m.def("arcs_qsigmoid_forward", &arcs_qsigmoid_forward, "arcs_qsigmoid_forward(CPU/GPU)");
+    m.def("venus_qtanh_forward", &venus_qtanh_forward, "venus_qtanh_forward(CPU/GPU)");
     m.def("venusa_qtanh_forward", &venusa_qtanh_forward, "venusa_qtanh_forward(CPU/GPU)");
     m.def("arcs_qtanh_forward", &arcs_qtanh_forward, "arcs_qtanh_forward(CPU/GPU)");
     m.def("qlayernorm_kernel_forward", &qlayernorm_kernel_forward, "qlayernorm_kernel_forward(CPU/GPU)");

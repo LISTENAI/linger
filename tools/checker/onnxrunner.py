@@ -22,7 +22,7 @@ import math
 
 # DUMP_FORMAT = Literal['float', 'quantized', 'all']
 DUMP_FORMAT = {'float', 'quantized', 'all'}
-TRANSPARENT_OPS = {'Reshape', 'Transpose', 'Gather', 'Squueze', 'Unsqueeze', 'Slice', 'Split', 'MaxPool',\
+TRANSPARENT_OPS = {'Reshape', 'Transpose', 'Gather', 'Squeeze', 'Unsqueeze', 'Slice', 'Split', 'MaxPool',\
                     'Relu', 'Clip', 'Prelu', 'Resize'}
 
 class OnnxRunner:
@@ -238,15 +238,13 @@ class OnnxRunner:
             self.__tensor_dict[node.output[0]] = ops_outputs
             self._tensor_shapes[node.output[0]] = tuple(ops_outputs.shape)
             if self._dump:
+                tensor_name = node.output[0].replace("/", "_")
+
                 if self._dump_fmt == 'float' or self._dump_fmt == 'all':
-                    dump_path = self.__float_dump_path+os.sep +node.output[0] +"##_float_dump.txt"
-                
-                    # if ops_outputs.device.type == 'cuda':
-                    #     np.savetxt(dump_path, ops_outputs.flatten().cpu().numpy(),fmt="%f")
-                    # else:
+                    dump_path = self.__float_dump_path+os.sep +tensor_name +"##_float_dump.txt"
                     np.savetxt(dump_path, ops_outputs.detach().flatten().numpy(),fmt="%f")
                 if self._dump_fmt == 'quantized' or self._dump_fmt == "all":
-                    dump_path = self.__int_dump_path+os.sep +node.output[0] +"##_int_dump.txt"
+                    dump_path = self.__int_dump_path+os.sep +tensor_name +"##_int_dump.txt"
                     if isinstance(ops_outputs, linger.QTensor):
                         scale = ops_outputs.scale
                         bits = ops_outputs.data_bits
@@ -270,11 +268,12 @@ class OnnxRunner:
                 self._tensor_shapes[output] = tuple(flat_outputs[output_idx].shape)
 
                 if self._dump and isinstance(flat_outputs[output_idx], torch.Tensor):
+                    tensor_name = node.output[output_idx].replace("/", "_")
                     if self._dump_fmt == 'float' or self._dump_fmt == 'all':
-                        dump_path = self.__float_dump_path + os.sep + node.output[output_idx] +"##_float_dump.txt"
+                        dump_path = self.__float_dump_path + os.sep + tensor_name +"##_float_dump.txt"
                         np.savetxt(dump_path, flat_outputs[output_idx].detach().flatten().cpu().numpy(), fmt="%f")
                     if self._dump_fmt == 'quantized' or self._dump_fmt == "all":
-                        dump_path = self.__int_dump_path + os.sep +node.output[output_idx] +"##_int_dump.txt"
+                        dump_path = self.__int_dump_path + os.sep + tensor_name +"##_int_dump.txt"
                         if isinstance(flat_outputs[output_idx], linger.QTensor):
                             scale = flat_outputs[output_idx].scale
                             bits = flat_outputs[output_idx].data_bits

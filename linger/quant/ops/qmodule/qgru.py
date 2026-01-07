@@ -3,6 +3,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import _VF
 
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
@@ -32,19 +33,23 @@ class QGRUSigmoidFunction(torch.autograd.Function):
     def forward(ctx, input):
         ctx.save_for_backward(input)
 
-        # 转换为Q27格式的int32
-        i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-        i_q27.clamp_(-2**31, 2**31-1)
-
-        output_q31 = None
         if QUANT_CONFIGS.platform == PlatForm.venus:
-            output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
-        elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-            output_q31 = lingerext.arcs_qsigmoid_forward(i_q27.contiguous())
-        elif QUANT_CONFIGS.platform == PlatForm.venusA:
-            output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
+            # 转换为Q11格式的int32
+            i_q11 = (input * (1 << 11) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
+            i_q11.clamp_(-2**15, 2**15-1)
+            output_q15 = lingerext.venus_qsigmoid_forward(i_q11.contiguous())
+        else:
+            # 转换为Q27格式的int32
+            i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
+            i_q27.clamp_(-2**31, 2**31-1)
 
-        output_q15 = luna_requant(output_q31.int(), 31, 15)
+            output_q31 = None
+            if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
+                output_q31 = lingerext.arcs_qsigmoid_forward(i_q27.contiguous())
+            elif QUANT_CONFIGS.platform == PlatForm.venusA:
+                output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
+
+            output_q15 = luna_requant(output_q31.int(), 31, 15)
         output = output_q15.float() / (1 << 15)
         return output
     
@@ -59,26 +64,32 @@ class QGRUSigmoidFunction(torch.autograd.Function):
             y = F.sigmoid(input)
             gradInput = torch.autograd.grad(y, input, grad_output)
 
-        return gradInput
+        return gradInput[0]
 
 class QGRUTanhFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
         ctx.save_for_backward(input)
 
-        # 转换为Q27格式的int32
-        i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-        i_q27.clamp_(-2**31, 2**31-1)
-
-        output_q31 = None
         if QUANT_CONFIGS.platform == PlatForm.venus:
-            output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
-        elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-            output_q31 = lingerext.arcs_qtanh_forward(i_q27.contiguous())
-        elif QUANT_CONFIGS.platform == PlatForm.venusA:
-            output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
+            # 转换为Q11格式的int32
+            i_q11 = (input * (1 << 11) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
+            i_q11.clamp_(-2**15, 2**15-1)
+            output_q15 = lingerext.venus_qtanh_forward(i_q11.contiguous())
+        else:
+            # 转换为Q27格式的int32
+            i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
+            i_q27.clamp_(-2**31, 2**31-1)
 
-        output_q15 = luna_requant(output_q31.int(), 31, 15)
+            output_q31 = None
+            if QUANT_CONFIGS.platform == PlatForm.venus:
+                output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
+            elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
+                output_q31 = lingerext.arcs_qtanh_forward(i_q27.contiguous())
+            elif QUANT_CONFIGS.platform == PlatForm.venusA:
+                output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
+
+            output_q15 = luna_requant(output_q31.int(), 31, 15)
         output = output_q15.float() / (1 << 15)
         return output
     
@@ -93,7 +104,7 @@ class QGRUTanhFunction(torch.autograd.Function):
             y = F.tanh(input)
             gradInput = torch.autograd.grad(y, input, grad_output)
 
-        return gradInput
+        return gradInput[0]
 
 class QGRUOnnxFunction(torch.autograd.Function):
     @staticmethod
@@ -365,14 +376,18 @@ class QGRU(QModuleMixin, nn.GRU):
             lengths = torch.tensor([seq_len for i in range(batch_size)], dtype=torch.int64, device=input.device) if lengths is None else lengths
 
         qparam_dict = generate_onnx_qparam_dict(self, False)
+        weight_ih, weight_hh = self.qweight_ih_hh
+        bias_ih, bias_hh = self.qbias_ih_hh
         if self.bidirectional:
+            weight_ih_r, weight_hh_r = self.qweight_ih_hh_reverse
+            bias_ih_r, bias_hh_r = self.qbias_ih_hh_reverse
             output, hy = QGRUOnnxFunction.apply(input, hidden_state, 
-                                self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0, 
-                                self.weight_ih_l0_reverse, self.weight_hh_l0_reverse, self.bias_ih_l0_reverse, self.bias_hh_l0_reverse,
+                                weight_ih, weight_hh, bias_ih, bias_hh, 
+                                weight_ih_r, weight_hh_r, bias_ih_r, bias_hh_r,
                                 self.hidden_size, self.num_layers, self.batch_first, self.bidirectional, qparam_dict)
         else:
             output, hy = QGRUOnnxFunction.apply(input, hidden_state, 
-                                self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0, 
+                                weight_ih,weight_hh, bias_ih, bias_hh, 
                                 None, None, None, None,
                                 self.hidden_size, self.num_layers, self.batch_first, self.bidirectional, qparam_dict)
 
@@ -418,39 +433,31 @@ class QGRU(QModuleMixin, nn.GRU):
 
             self.check_forward_args(input, hx, batch_sizes)
 
+            flat_weights = []
             w_ih, w_hh = self.qweight_ih_hh
             b_ih, b_hh = self.qbias_ih_hh
-            hx_f = hx[0:1,:,:]
-            output, hidden = torch.ops.aten.gru(
-                                input, hx_f, [w_ih, w_hh, b_ih, b_hh],
-                                has_biases=self.bias,
-                                num_layers=self.num_layers,
-                                dropout=self.dropout,
-                                train=self.training,
-                                bidirectional=False,
-                                batch_first=self.batch_first
-                            )
-            hidden = self.quantize_gru_hidden(hidden, 0)
-            output = self.quantize_gru_out(output, 0)
+            flat_weights.extend([w_ih, w_hh])
+            if self.bias:
+                flat_weights.extend([b_ih, b_hh])
 
             if self.bidirectional:
-                input_r = input.flip(1) if self.batch_first else input.flip(0)
-                hx_b = hx[1:, :, :]
                 w_ih_r, w_hh_r = self.qweight_ih_hh_reverse
                 b_ih_r, b_hh_r = self.qbias_ih_hh_reverse
-                output_r, hidden_r = torch.ops.aten.gru(
-                                input_r, hx_b, [w_ih_r, w_hh_r, b_ih_r, b_hh_r],
-                                has_biases=self.bias,
-                                num_layers=self.num_layers,
-                                dropout=self.dropout,
-                                train=self.training,
-                                bidirectional=False,
-                                batch_first=self.batch_first
-                            )
-                hidden_r = self.quantize_gru_hidden(hidden_r, 1)
-                output_r = self.quantize_gru_out(output_r, 1)
-                output = torch.cat((output, output_r), -1)
-                hidden = torch.cat((hidden, hidden_r), -1)
+                flat_weights.extend([w_ih_r, w_hh_r])
+                if self.bias:
+                    flat_weights.extend([b_ih_r, b_hh_r])
+
+            if batch_sizes is None:
+                output, hidden = _VF.gru(input, hx, flat_weights, self.bias, self.num_layers,
+                                         self.dropout, self.training, self.bidirectional, self.batch_first)
+            else:
+                output, hidden = _VF.gru(input, batch_sizes, hx, flat_weights, self.bias,
+                                         self.num_layers, self.dropout, self.training, self.bidirectional)
+
+            hidden = self.quantize_gru_hidden(hidden, 0)
+            hidden_r = self.quantize_gru_hidden(hidden, 1)
+            output = self.quantize_gru_out(output, 0)
+            output_r = self.quantize_gru_out(output, 1)
                 
             output = from_tensor_to_qtensor(output, self.output_quantizer.scale, self.output_quantizer.data_bits)
 

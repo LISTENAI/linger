@@ -4,14 +4,14 @@ from typing import Optional, Union, Dict, Any
 
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
-from ....constrain.cconvbn2d import CConvBN2d, ConvBN2d, static_clip, dyn_clip_weight
+from ....constrain import ConvTransposeBN2d, CConvTransposeBN2d, static_clip, dyn_clip_weight
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from ....utils import QatMethod
 
-class QConvBN2dOnnxFunction(torch.autograd.Function):
+class QConvTransposeBN2dOnnxFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
-        return F.conv2d(input, weights, bias, stride=stride, padding=padding, dilation=dilation, groups=groups)
+    def forward(ctx, input, weight, bias, stride, padding, output_padding, dilation, groups, qparam_dict = None):
+        return F.conv_transpose2d(input, weight, bias, stride, padding, output_padding, groups, dilation)
     @staticmethod
     def symbolic(g, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
         op_type = qparam_dict.get("op_type", "QGeneric")
@@ -32,9 +32,9 @@ class QConvBN2dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
-@register_qmodule(ConvBN2d)
-@register_qmodule(CConvBN2d)
-class QConvBN2d(QModuleMixin, CConvBN2d):
+@register_qmodule(ConvTransposeBN2d)
+@register_qmodule(CConvTransposeBN2d)
+class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
     @classmethod
     def qcreate(
         cls,
@@ -83,6 +83,7 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
         convbn_mdl.dilation = module.conv.dilation
         convbn_mdl.kernel_size = module.conv.kernel_size
         convbn_mdl.padding = module.conv.padding
+        convbn_mdl.output_padding = module.conv.output_padding
         convbn_mdl.stride = module.conv.stride
         convbn_mdl.groups = module.conv.groups
         convbn_mdl.output_padding = module.conv.output_padding
@@ -92,7 +93,8 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.training:
             # conv_rlt = self.conv(input) # for calculate bn mean and var
-            conv_rlt = self.conv._conv_forward(input, self.conv.weight, self.conv.bias)
+            conv_rlt = F.conv_transpose2d(input, self.conv.weight, self.conv.bias, self.conv.stride,
+                                          self.conv.padding, self.conv.output_padding, self.conv.groups, self.conv.dilation,)
             N, C, H, W = conv_rlt.size()
             bn_size = N * H * W
             conv_rlt = conv_rlt.permute(1, 0, 2, 3).contiguous().view(C, bn_size)
@@ -114,11 +116,11 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
                         self.bn.weight.unsqueeze(1) + self.bn.bias.unsqueeze(1))
             bn_rlt = bn_rlt.view(C, N, H, W).permute(1, 0, 2, 3).contiguous()
             w_bn_ = self.bn.weight.div(torch.sqrt(unbias_var_ + self.bn.eps))
-            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1, 1))
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:
-                b_conv_ = torch.zeros(self.conv.weight.size(0), device=input.device)
+                b_conv_ = torch.zeros(self.conv.weight.size(1), device=input.device)
             b_bn_ = self.bn.bias - self.bn.weight.mul(mean_).div(torch.sqrt(unbias_var_ + self.bn.eps))
             new_bias = b_conv_.mul(w_bn_) + b_bn_
             # MOM策略时，clip信息无法固定给到new_weight, new_bias。TQT时会调用校准，scale自动截断
@@ -138,16 +140,16 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
             fake_weight = self.weight_quantizer(new_weight)
             fake_bias = self.bias_quantizer(new_bias)
 
-            new_conv_rlt = F.conv2d(input, fake_weight, fake_bias, self.conv.stride,
-                                    self.conv.padding, self.conv.dilation, self.conv.groups)
+            new_conv_rlt = output = F.conv_transpose2d(input, fake_weight, fake_bias,
+                                    self.stride, self.padding, self.output_padding, self.groups, self.dilation)
             output = alpha * bn_rlt + (1 - alpha) * new_conv_rlt
         else:
             w_bn_ = self.bn.weight.div(torch.sqrt(self.bn.eps + self.bn.running_var))
-            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1, 1))
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:
-                b_conv_ = torch.zeros(self.conv.weight.size(0), device=input.device)
+                b_conv_ = torch.zeros(self.conv.weight.size(1), device=input.device)
             b_bn_ = self.bn.bias - self.bn.weight.mul(self.bn.running_mean).div(
                 torch.sqrt(self.bn.running_var + self.bn.eps))
             new_bias = b_conv_.mul(w_bn_) + b_bn_
@@ -167,10 +169,9 @@ class QConvBN2d(QModuleMixin, CConvBN2d):
             self.bias.data = new_bias
             if torch.onnx.is_in_onnx_export():
                 qparam_dict = generate_onnx_qparam_dict(self, False)
-                output = QConvBN2dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
+                output = QConvTransposeBN2dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.output_padding, self.dilation, self.groups, qparam_dict)
             else:
-                output = F.conv2d(input, self.qweight, self.qbias, self.stride,
-                            self.padding, self.dilation, self.groups)
-        
+                output = F.conv_transpose2d(input, self.qweight, self.qbias, 
+                                            self.stride, self.padding, self.output_padding, self.groups, self.dilation)
         return output
 

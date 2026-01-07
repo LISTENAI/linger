@@ -16,14 +16,20 @@ version_patch = int(versions[2])
 if version_maj*100+version_min*10 + version_patch >= 151:
     sources.append('linger/kernel/cpu/util_kernel.cpp')
     sources.append('linger/kernel/gpu/util_kernel.cu')
-    sources.append('linger/kernel/cpu/arcs_qsoftmax_kernel.cpp')
-    sources.append('linger/kernel/gpu/arcs_qsoftmax_kernel.cu')
+    sources.append('linger/kernel/cpu/venus_qsoftmax_kernel.cpp')
+    sources.append('linger/kernel/gpu/venus_qsoftmax_kernel.cu')
     sources.append('linger/kernel/cpu/venusa_qsoftmax_kernel.cpp')
     sources.append('linger/kernel/gpu/venusa_qsoftmax_kernel.cu')
+    sources.append('linger/kernel/cpu/arcs_qsoftmax_kernel.cpp')
+    sources.append('linger/kernel/gpu/arcs_qsoftmax_kernel.cu')
+    sources.append('linger/kernel/cpu/venus_qsigmoid_kernel.cpp')
+    sources.append('linger/kernel/gpu/venus_qsigmoid_kernel.cu')
     sources.append('linger/kernel/cpu/venusa_qsigmoid_kernel.cpp')
     sources.append('linger/kernel/gpu/venusa_qsigmoid_kernel.cu')
     sources.append('linger/kernel/cpu/arcs_qsigmoid_kernel.cpp')
     sources.append('linger/kernel/gpu/arcs_qsigmoid_kernel.cu')
+    sources.append('linger/kernel/cpu/venus_qtanh_kernel.cpp')
+    sources.append('linger/kernel/gpu/venus_qtanh_kernel.cu')
     sources.append('linger/kernel/cpu/venusa_qtanh_kernel.cpp')
     sources.append('linger/kernel/gpu/venusa_qtanh_kernel.cu')
     sources.append('linger/kernel/cpu/arcs_qtanh_kernel.cpp')
@@ -34,7 +40,7 @@ if version_maj*100+version_min*10 + version_patch >= 151:
 
 setup(
     name="linger",
-    version="3.0.3",
+    version="3.0.4",
     description="linger is package of fix training",
     author="ListenAI",
     ext_modules=[
@@ -62,7 +68,7 @@ setup(
     classifiers=[
         "Operating System :: OS Independent",
         "Intended Audience :: Developers and Researchers",
-        "License :: OSI Approved :: iflytek internal License",
+        "License :: OSI Approved :: Apache Software License",
         "Programming Language :: python",
     ],
 )

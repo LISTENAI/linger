@@ -58,7 +58,7 @@ class QSoftmaxFunction(torch.autograd.Function):
 
         output_q15 = None
         if QUANT_CONFIGS.platform == PlatForm.venus:
-            output_q15 = lingerext.arcs_qsoftmax_forward(x_q25, dim)
+            output_q15 = lingerext.venus_qsoftmax_forward(x_q25, dim)
         elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
             output_q15 = lingerext.arcs_qsoftmax_forward(x_q25, dim)
         elif QUANT_CONFIGS.platform == PlatForm.venusA:

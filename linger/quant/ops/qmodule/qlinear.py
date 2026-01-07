@@ -60,6 +60,6 @@ class QLinear(QModuleMixin, nn.Linear):
     def forward(self, input):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
-            return QLinearOnnxFunction.apply(input, self.weight, self.bias, qparam_dict)
+            return QLinearOnnxFunction.apply(input, self.qweight, self.qbias, qparam_dict)
         return F.linear(input, self.qweight, bias=self.qbias)
 

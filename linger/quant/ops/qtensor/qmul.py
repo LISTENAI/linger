@@ -40,13 +40,5 @@ class QMul(QModuleTensor):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, True)
             return QMulOnnxFunction.apply(x, y, qparam_dict)
-        elif self.training:
-            self.output_quantizer.min_scale = torch.min(self.input_quantizer[0].scale, self.input_quantizer[1].scale)
-        else:
-            if self.output_quantizer.scale != self.input_quantizer[0].scale:
-                int_x = self.input_quantizer[0].quant_round(x * self.output_quantizer.scale, self.input_quantizer[0].round_mode)
-                x = int_x / self.output_quantizer.scale
-            if self.output_quantizer.scale != self.input_quantizer[1].scale:
-                int_y = self.input_quantizer[1].quant_round(y * self.output_quantizer.scale, self.input_quantizer[1].round_mode)
-                y = int_y / self.output_quantizer.scale
+
         return x * y

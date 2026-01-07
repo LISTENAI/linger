@@ -6,17 +6,6 @@ fi
 
 # pip install -r requirements.txt
 
-module unload gcc
-module unload cuda
-module unload cmake
-
-module load gcc/10.2.0
-module load cuda/11.8-cudnn-v8.9.0
-
-# module load gcc/5.4-os7
-# module load cuda/10.2-cudnn-7.6.5
-
-module load cmake/3.29.0
 echo -n "GCC-verion: "
 which gcc
 echo -n "CUDA-verion: "

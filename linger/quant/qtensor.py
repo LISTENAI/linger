@@ -1,13 +1,27 @@
 import torch
-from torch.utils import _pytree as pytree
 from torch._C import DisableTorchFunction
-
+from packaging.version import Version
 from .ops import *
 
-def qfallback(callable, *args, **kwargs):
-    kwargs = kwargs or {}
-    args, kwargs = pytree.tree_map_only(QTensor, lambda x: x.value, (args, kwargs))
-    return callable(*args, **kwargs)
+if Version(torch.__version__) >= Version("2.0"):
+    from torch.utils import _pytree as pytree
+    def qfallback(callable, *args, **kwargs):
+        kwargs = kwargs or {}
+        args, kwargs = pytree.tree_map_only(QTensor, lambda x: x.value, (args, kwargs))
+        return callable(*args, **kwargs)
+else:
+    from torch.utils._pytree import tree_map
+    def tree_map_only(ty, fn, obj):
+        def _fn(x):
+            if isinstance(x, ty):
+                return fn(x)
+            return x
+        return tree_map(_fn, obj)
+    
+    def qfallback(callable, *args, **kwargs):
+        kwargs = kwargs or {}
+        args, kwargs = tree_map_only(QTensor, lambda x: x.value, (args, kwargs))
+        return callable(*args, **kwargs)
 
 class Convert2QTensor(torch.autograd.Function):
     @staticmethod
@@ -47,7 +61,7 @@ class QTensor(torch.Tensor):
         self.data_bits = data_bits
         self.value = data
 
-    if torch.__version__ >= '1.7.0':
+    if Version(torch.__version__) >= Version("1.7.0"):
         @classmethod
         def __torch_function__(cls, func, types, args=(), kwargs=None):        
             if kwargs is None:
@@ -63,7 +77,7 @@ class QTensor(torch.Tensor):
                 ret = func(*args, **kwargs)
                 return ret
             
-    if torch.__version__ >= '2.0':
+    if Version(torch.__version__) >= Version("2.0"):
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             kwargs = kwargs or {}
             op = func.overloadpacket
@@ -71,7 +85,7 @@ class QTensor(torch.Tensor):
             if qdispatch is not None:
                 return qdispatch(*args, **kwargs)
             return qfallback(func, *args, **kwargs)
-    elif torch.__version__ >= '1.10':
+    else:
         def __torch_dispatch__(self, func, args=(), kwargs=None):
             kwargs = kwargs or {}
             op = func.overloadpacket

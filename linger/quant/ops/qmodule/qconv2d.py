@@ -62,6 +62,6 @@ class QConv2d(QModuleMixin, torch.nn.Conv2d):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
-            return QConv2dOnnxFunction.apply(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
+            return QConv2dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
         return self._conv_forward(input, self.qweight, self.qbias)
 

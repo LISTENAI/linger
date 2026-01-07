@@ -4,8 +4,9 @@ from typing import Optional, Union, Dict, Any
 
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
-from ....constrain import CConvBN1d, ConvBN1d
+from ....constrain import CConvBN1d, ConvBN1d, static_clip, dyn_clip_weight
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....utils import QatMethod
 
 class QConvBN1dOnnxFunction(torch.autograd.Function):
     @staticmethod
@@ -124,6 +125,19 @@ class QConvBN1d(QModuleMixin, CConvBN1d):
             alpha = 0.1
 
             # fake_quant new_weight and new_bias
+
+            # MOM策略时，clip信息无法固定给到new_weight, new_bias。TQT时会调用校准，scale自动截断
+            if self.weight_quantizer.qat_method == QatMethod.MOM:
+                if not self.weight_quantizer.is_init_mom_clamp_weight:
+                    self.weight_quantizer.is_init_mom_clamp_weight.fill_(True) # 关闭weight_quantizer的初始化操作
+                if self.weight_quantizer.clamp_value is not None:
+                    new_weight = static_clip(new_weight, self.weight_quantizer.clamp_value)
+                else:
+                    new_weight = dyn_clip_weight(new_weight, self.weight_quantizer.clamp_factor)
+
+                if self.bias_quantizer.clamp_value is not None:
+                    new_bias = static_clip(new_bias, self.bias_quantizer.clamp_value)
+            # 结束
             fake_weight = self.weight_quantizer(new_weight)
             fake_bias = self.bias_quantizer(new_bias)
 
@@ -140,11 +154,25 @@ class QConvBN1d(QModuleMixin, CConvBN1d):
             b_bn_ = self.bn.bias - self.bn.weight.mul(self.bn.running_mean).div(
                 torch.sqrt(self.bn.running_var + self.bn.eps))
             new_bias = b_conv_.mul(w_bn_) + b_bn_
+
+            # MOM策略时，clip信息无法固定给到new_weight, new_bias。TQT时会调用校准，scale自动截断
+            if self.weight_quantizer.qat_method == QatMethod.MOM:
+                if not self.weight_quantizer.is_init_mom_clamp_weight:
+                    self.weight_quantizer.is_init_mom_clamp_weight.fill_(True) # 关闭weight_quantizer的初始化操作
+                if self.weight_quantizer.clamp_value is not None:
+                    new_weight = static_clip(new_weight, self.weight_quantizer.clamp_value)
+                else:
+                    new_weight = dyn_clip_weight(new_weight, self.weight_quantizer.clamp_factor)
+
+                if self.bias_quantizer.clamp_value is not None:
+                    new_bias = static_clip(new_bias, self.bias_quantizer.clamp_value)
+            # 结束
+            
             self.weight.data = new_weight
             self.bias.data = new_bias            
             if torch.onnx.is_in_onnx_export():
                 qparam_dict = generate_onnx_qparam_dict(self, False)
-                return QConvBN1dOnnxFunction.apply(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
+                return QConvBN1dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
             else:
                 output = F.conv1d(input, self.qweight, self.qbias, self.stride,
                             self.padding, self.dilation, self.groups)

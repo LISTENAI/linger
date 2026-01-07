@@ -5,8 +5,8 @@
 
 ### 创建虚拟环境
 ```Shell
-conda create -n linger-env python==3.12.10
-conda activate linger-env
+conda create -n linger_thinker_3.x python==3.12.10
+conda activate linger_thinker_3.x
 pip install -U pip
 cat requirements.txt | xargs -n 1 pip install
 ```

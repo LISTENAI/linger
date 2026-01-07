@@ -154,10 +154,8 @@ class CModuleMixin(ABC):
             s = nn.Conv2d.extra_repr(self)
         elif 'Linear' in self._get_name():
             s = nn.Linear.extra_repr(self)
-        elif 'Maxpool2d' in self._get_name():
-            s = nn.MaxPool2d.extra_repr(self)
-        elif 'Relu' in self._get_name():
-            s = nn.ReLU.extra_repr(self)
+        elif 'LSTM' in self._get_name():
+            s = nn.LSTM.extra_repr(self)
             
         extra_s = ', clamp_activation:{}, clamp_weight:{}, clamp_bias:{}, clamp_factor:{}'.format(self.clamp_activation, self.clamp_weight, self.clamp_bias, self.clamp_factor)
         return s + extra_s

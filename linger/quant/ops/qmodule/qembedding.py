@@ -76,7 +76,7 @@ class QEmbedding(QModuleMixin, nn.Embedding):
     def forward(self, input):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
-            return QEmbeddingOnnxFunction.apply(input, self.weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse, qparam_dict)
+            return QEmbeddingOnnxFunction.apply(input, self.qweight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse, qparam_dict)
         out_q =  F.embedding(
                     input,
                     self.qweight,

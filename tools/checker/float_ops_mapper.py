@@ -1,6 +1,6 @@
 import torch.nn.functional as F
 import torch
-from linger.checker.utils import get_param,register_op
+from .utils import get_param,register_op
 from onnx import numpy_helper
 import numpy as np
 
@@ -205,11 +205,9 @@ def shape(inputs, kwargs):
 
 
 @register_op(op_type="Gather")
-def gather(inputs, kwargs):  #please refer to test_onnx_averagepool_iq samples in test_onnx_runner.py
+def gather(inputs, kwargs):
     axis = kwargs.get('axis',0)
-    if "parameter_bits" in kwargs:
-        import linger
-        return linger.EmbeddingInt.run_onnx_embedding(inputs, kwargs)
+    
     if_torch = isinstance(inputs[0], torch.Tensor)
     if not isinstance(inputs[0], torch.Tensor):
         inputs[0] = torch.tensor(inputs[0]) if not isinstance(inputs[0], np.ndarray) else torch.from_numpy(inputs[0].copy())
@@ -226,9 +224,7 @@ def gather(inputs, kwargs):  #please refer to test_onnx_averagepool_iq samples i
         # output = F.embedding(torch.LongTensor(inputs[1]),inputs[0])
         output = inputs[0][inputs[1]]
         output =  output.transpose(axis, 0)
-    
-    if not if_torch:
-        return list(output.detach().numpy()) if output.numel() > 1 else output.item()
+
     return output
 
 

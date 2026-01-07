@@ -8,6 +8,8 @@ from .qavgpool1d import *
 from .qavgpool2d import *
 from .qconvtranspose1d import *
 from .qconvtranspose2d import *
+from .qconvtransposebn1d import *
+from .qconvtransposebn2d import *
 from .qconvbn1d import *
 from .qconvbn2d import *
 from .qbatchnorm1d import *

@@ -25,7 +25,7 @@ MODE_TABLE = {
 
 def StringToQuantMode(mode: str):
     try:
-        return MODE_TABLE[mode]
+        return MODE_TABLE[mode.lower()]
     except KeyError:
         raise ValueError(f"Invalid quant mode '{mode}'. Supported: {list(MODE_TABLE.keys())}")
     
@@ -156,7 +156,7 @@ def create_qmodule_tensor(q_cls: QModuleTensor, module: nn.Module, num_input: in
     instance.is_cat = is_cat
     instance.training = False
     
-    quant_mode = StringToQuantMode(attrs.get("quant_mode", None))
+    quant_mode = StringToQuantMode(attrs.get("quant_mode", 'floor_add'))
     data_bits = attrs.get('data_bits', 8)
     o_bits = attrs.get('o_bits', 8)
     scale_o = attrs.get("scale_o", 1.0)

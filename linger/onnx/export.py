@@ -21,12 +21,18 @@ torch_onnx_export = torch.onnx.export
 QDOMAIN_NAME = 'linger'
 
 def quant_weight_bias(f_data, data_bits, scale):
+    min_val = -(2**(data_bits - 1))
+    max_val = (2**(data_bits - 1)) - 1
+
+    x_scaled = np.round(f_data * scale)
+    x_clipped = np.clip(x_scaled, min_val, max_val)
+
     if data_bits <= 8:
-        q_val = np.round(f_data * scale).astype(np.int8)
+        q_val = x_clipped.astype(np.int8)
     elif data_bits <= 16:
-        q_val = np.round(f_data * scale).astype(np.int16)
+        q_val = x_clipped.astype(np.int16)
     else:
-        q_val = np.round(f_data * scale).astype(np.int32)
+        q_val = x_clipped.astype(np.int32)
     return q_val
 
 def convert_parameter_from_float_to_int(onnx_model):

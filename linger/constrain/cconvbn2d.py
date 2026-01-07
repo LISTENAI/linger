@@ -73,9 +73,10 @@ class ConvBN2d(nn.Module):
                 b_conv_ = self.conv.bias
             else:
                 b_conv_ = torch.zeros(self.conv.weight.size(0), device=input.device)
-            b_bn_ = self.bn.bias - self.bn.weight.mul(self.bn.running_mean).div(
-                torch.sqrt(self.bn.running_var + self.bn.eps))
-            new_bias = b_conv_.mul(w_bn_) + b_bn_
+            # b_bn_ = self.bn.bias - self.bn.weight.mul(self.bn.running_mean).div(
+            #     torch.sqrt(self.bn.running_var + self.bn.eps))
+            # new_bias = b_conv_.mul(w_bn_) + b_bn_
+            new_bias = (b_conv_ - self.bn.running_mean) * w_bn_ + self.bn.bias # 等价, 优化计算逻辑
             if self.clamp_weight is not None:
                 new_weight = static_clip(new_weight, self.clamp_weight)
             else:
