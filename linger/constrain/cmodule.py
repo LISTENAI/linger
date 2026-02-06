@@ -130,7 +130,7 @@ class CModuleMixin(ABC):
 
     @property
     def cbias(self):
-        return self.bias if self.clamp_bias is None else torch.clamp(self.bias, min = -self.clamp_bias, max = self.clamp_bias)
+        return self.bias if (self.clamp_bias is None or self.bias is None) else torch.clamp(self.bias, min = -self.clamp_bias, max = self.clamp_bias)
 
 
     def cforward(self, input: torch.Tensor) -> torch.Tensor:

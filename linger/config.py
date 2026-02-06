@@ -133,6 +133,7 @@ class QuantConfig(Singleton):
         将当前配置保存到 YAML 文件
         """
         config_dict = cls._to_save_dict()
+        config_dict.pop('calibration', None)
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.dump(config_dict, f, default_flow_style=False, indent=2, allow_unicode=True)

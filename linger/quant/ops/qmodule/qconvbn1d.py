@@ -32,8 +32,8 @@ class QConvBN1dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
-@register_qmodule(ConvBN1d)
-@register_qmodule(CConvBN1d)
+# @register_qmodule(ConvBN1d)
+# @register_qmodule(CConvBN1d)
 class QConvBN1d(QModuleMixin, CConvBN1d):
     @classmethod
     def qcreate(

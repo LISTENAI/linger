@@ -18,7 +18,7 @@ linger 基于 PyTorch 进行量化算子的搭建，因此只要符合 PyTorch �
 
 ## 快速入门
 - [安装](doc/tutorial/install.md)：支持pip、源码、docker三种安装方式
-- [量化训练快速入门](doc/tutorial/quant_quick_strat.md): 先进行浮点网络的约束训练，再针对量化友好的浮点模型进行量化训练微调
+- [量化训练快速入门](doc/tutorial/quant_quick_start.md): 先进行浮点网络的约束训练，再针对量化友好的浮点模型进行量化训练微调
 - [量化训练进阶指导](doc/tutorial/quant_advanced_guide.md): 量化进阶配置
 - [onnx导出教程](doc/tutorial/export_onnx.md)：将量化无损的PyTorch模型导出为ONNX格式的模型
 

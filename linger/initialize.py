@@ -14,15 +14,48 @@ from .quant.ops.qconfig import _QMODULE_TABLE, _QTENSOR_OP_TABLE, quantize_modul
 from .constrain.cmodule import constrain_module, _CMODULE_TABLE
 from typing import Any, Dict, List, Optional, Union
 
+def fuse_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    
+    eps = 1e-5
+    clamp_conv_name = prefix + 'conv'
+    clamp_bn_name = prefix + 'bn'
+    conv_int_name = prefix
+    if clamp_conv_name + '.weight' in state_dict and clamp_bn_name + '.weight' in state_dict:
+        b_mean = state_dict[clamp_bn_name + '.running_mean']
+        b_var = state_dict[clamp_bn_name + '.running_var']
+        b_w = state_dict[clamp_bn_name + '.weight']
+        b_b = state_dict[clamp_bn_name + '.bias']
+        sigma = 1 / torch.sqrt(b_var + eps)
+        alpha = b_w * sigma
+        beta = b_b - b_mean * alpha
+        c_w = state_dict[clamp_conv_name + '.weight']
+        state_dict[conv_int_name +
+                   'weight'] = (c_w * alpha.view(-1, *([1]*(len(c_w.shape)-1))))
+        if clamp_conv_name + '.bias' in state_dict:
+            c_b = state_dict[clamp_conv_name + '.bias']
+            state_dict[conv_int_name + 'bias'] = (c_b * alpha + beta)
+            state_dict.pop(clamp_conv_name + '.bias')
+        else:
+            state_dict[conv_int_name + 'bias'] = beta
+        state_dict.pop(clamp_bn_name + '.running_mean')
+        state_dict.pop(clamp_bn_name + '.running_var')
+        state_dict.pop(clamp_bn_name + '.weight')
+        state_dict.pop(clamp_bn_name + '.bias')
+        state_dict.pop(clamp_bn_name + '.num_batches_tracked')
+        state_dict.pop(clamp_conv_name + '.weight')
+    else:
+        assert clamp_conv_name + '.weight' not in state_dict and clamp_bn_name + \
+            '.weight' not in state_dict, 'load quanted model but contain float clamp params'
+
 @contextmanager
-def calibration(a_calibrate_name='top_10', w_calibrate_name='abs_max'):
+def calibration():
     # 保存旧值
-    old_a_calibrate_name = QUANT_CONFIGS.quant_info.a_calibrate_name
-    old_w_calibrate_name = QUANT_CONFIGS.quant_info.w_calibrate_name
+    # old_a_calibrate_name = QUANT_CONFIGS.quant_info.a_calibrate_name
+    # old_w_calibrate_name = QUANT_CONFIGS.quant_info.w_calibrate_name
     try:
         QUANT_CONFIGS.calibration = True
-        QUANT_CONFIGS.quant_info.a_calibrate_name = a_calibrate_name
-        QUANT_CONFIGS.quant_info.w_calibrate_name = w_calibrate_name
+        # QUANT_CONFIGS.quant_info.a_calibrate_name = a_calibrate_name
+        # QUANT_CONFIGS.quant_info.w_calibrate_name = w_calibrate_name
         yield  # <<< 关键点：控制权交给 with 块
     finally:
         QUANT_CONFIGS.calibration = False
@@ -84,15 +117,20 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
     # traced_model = symbolic_trace(model)
     # model = _replace_ops(traced_model, q_configs)
 
+    has_replaced = []
     for name, m in model.named_modules():
         if disable_submodel is not None and any(fnmatch(name, pattern) for pattern in disable_submodel):
+            continue
+        if any(name.startswith(p + ".") for p in has_replaced):
             continue
         
         m.register_forward_pre_hook(hook_pre_forward)
         m.register_forward_hook(hook_forward)
 
-        _quantize_submodule(model, name, m, weights_cfg=q_configs.quant_info.to_dict(), activations_cfg=q_configs.quant_info.to_dict(), bias_cfg=q_configs.quant_info.to_dict(), constrain =  q_configs.clamp_info.to_dict())
-    
+        is_replaced = _quantize_submodule(model, name, m, weights_cfg=q_configs.quant_info.to_dict(), activations_cfg=q_configs.quant_info.to_dict(), bias_cfg=q_configs.quant_info.to_dict(), constrain =  q_configs.clamp_info.to_dict())
+        if is_replaced:
+            has_replaced.append(name)
+
     def quant_tensor_pre_hook(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
     
         def quant_tensor_layer(module, prefix=''):
@@ -212,6 +250,12 @@ def _quantize_submodule(
     constrain: Optional[Union[str]] = None,
 ):
     qmodule = quantize_module(module, weights_cfg=weights_cfg, activations_cfg=activations_cfg, bias_cfg = bias_cfg, dim = getattr(module, "dim", None), constrain = constrain)
+    if isinstance(module, ConvBN1d) or isinstance(module, CConvBN1d)  \
+        or isinstance(module, ConvBN2d) or isinstance(module, CConvBN2d) \
+        or isinstance(module, ConvTransposeBN1d) or isinstance(module, CConvTransposeBN1d) \
+        or isinstance(module, ConvTransposeBN2d) or isinstance(module, CConvTransposeBN2d):
+        qmodule._register_load_state_dict_pre_hook(fuse_state_dict)
+
     if qmodule is not None:
         _set_module_by_name(model, name, qmodule)
         qmodule.name = name
@@ -219,6 +263,8 @@ def _quantize_submodule(
             # Save device memory by clearing parameters
             setattr(module, name, None)
             del param
+        return True
+    return False
 
 def _constrain_submodule(
     model: torch.nn.Module,

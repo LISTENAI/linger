@@ -13,7 +13,7 @@ class QConvTransposeBN2dOnnxFunction(torch.autograd.Function):
     def forward(ctx, input, weight, bias, stride, padding, output_padding, dilation, groups, qparam_dict = None):
         return F.conv_transpose2d(input, weight, bias, stride, padding, output_padding, groups, dilation)
     @staticmethod
-    def symbolic(g, input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+    def symbolic(g, input, weight, bias, stride, padding, output_padding, dilation, groups, qparam_dict = None):
         op_type = qparam_dict.get("op_type", "QGeneric")
         is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
         node_name = f"{QDOMAIN_NAME}::{op_type}"
@@ -21,9 +21,9 @@ class QConvTransposeBN2dOnnxFunction(torch.autograd.Function):
         qparam_dict.pop('is_input_qtensor', None)
         if is_input_qtensor is False or is_input_qtensor is None:
             op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
-            input_list = [op_inner, weights]
+            input_list = [op_inner, weight]
         else:
-            input_list = [input, weights]
+            input_list = [input, weight]
         if bias is not None:
             input_list.append(bias)
         return g.op(
@@ -32,8 +32,8 @@ class QConvTransposeBN2dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
-@register_qmodule(ConvTransposeBN2d)
-@register_qmodule(CConvTransposeBN2d)
+# @register_qmodule(ConvTransposeBN2d)
+# @register_qmodule(CConvTransposeBN2d)
 class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
     @classmethod
     def qcreate(
@@ -51,9 +51,10 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
             kernel_size=module.conv.kernel_size,
             stride=module.conv.stride,
             padding=module.conv.padding,
-            dilation=module.conv.dilation,
+            output_padding=module.conv.output_padding,
             groups=module.conv.groups,
-            bias=module.conv.bias is not None,
+            bias=True,
+            dilation=module.conv.dilation,
             padding_mode=module.conv.padding_mode,
             eps=module.bn.eps,
             momentum=module.bn.momentum,
@@ -116,7 +117,7 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
                         self.bn.weight.unsqueeze(1) + self.bn.bias.unsqueeze(1))
             bn_rlt = bn_rlt.view(C, N, H, W).permute(1, 0, 2, 3).contiguous()
             w_bn_ = self.bn.weight.div(torch.sqrt(unbias_var_ + self.bn.eps))
-            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1, 1))
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:
@@ -145,7 +146,7 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
             output = alpha * bn_rlt + (1 - alpha) * new_conv_rlt
         else:
             w_bn_ = self.bn.weight.div(torch.sqrt(self.bn.eps + self.bn.running_var))
-            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1, 1))
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:

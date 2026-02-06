@@ -6,6 +6,9 @@ from itertools import repeat
 from typing import List, Dict, Any
 from enum import Enum
 
+LINGER_IGNORE_PAMAMTER = "_linger_ignore_parameter"
+LINGER_ACTIVATION_TYPE = "_linger_activation_type"
+
 # 单例模式
 class Singleton(object):
     def __new__(cls, *args, **kw):
@@ -164,4 +167,4 @@ def hx_slice(input_hidden, cur_hidden, last_batch_size, cur_batch_size):
 
 
 __all__ = ['Singleton', 'PlatForm', 'ActivationType', 'QuantMode', 'QuantStrategy', 'FakeQuantMethod', 'QatMethod', 'get_device', 'quant', 'dequant',
-           '_unbind', '_unbind_packed', '_slice', 'hx_slice']
+           '_unbind', '_unbind_packed', '_slice', 'hx_slice', 'LINGER_IGNORE_PAMAMTER', 'LINGER_ACTIVATION_TYPE']

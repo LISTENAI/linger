@@ -64,7 +64,7 @@ class QSigmoidFunction(torch.autograd.Function):
                 output_q31 = lingerext.venusa_qsigmoid_forward(x_q27.contiguous())
             
             # 转换为浮点数 (Q31 -> float)
-            output = output_q31.float() / (1 << 31)
+            output = output_q31.float() / (float(2**31))
         
         return output
 
@@ -76,10 +76,10 @@ class QSigmoidFunction(torch.autograd.Function):
         x = x.detach().clone().requires_grad_(True)
         grad = None
         with torch.enable_grad():
-            y = F.sigmoid(x)
+            y = torch.sigmoid(x)
             grad = torch.autograd.grad(y, x, grad_output)
-        
         return grad[0], None
+
 
 # @register_qmodule(nn.Sigmoid)
 class QSigmoid(QModuleTensor):

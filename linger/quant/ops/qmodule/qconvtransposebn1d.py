@@ -14,7 +14,7 @@ class QConvTransposeBN1dOnnxFunction(torch.autograd.Function):
         return F.conv_transpose1d(input, weight, bias, stride, padding, 
                                   output_padding, groups, dilation)
     @staticmethod
-    def symbolic(g,  input, weights, bias, stride, padding, dilation, groups, qparam_dict = None):
+    def symbolic(g, input, weight, bias, stride, padding, output_padding, dilation, groups, qparam_dict = None):
         op_type = qparam_dict.get("op_type", "QGeneric")
         is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
         node_name = f"{QDOMAIN_NAME}::{op_type}"
@@ -22,9 +22,9 @@ class QConvTransposeBN1dOnnxFunction(torch.autograd.Function):
         qparam_dict.pop('is_input_qtensor', None)
         if is_input_qtensor is False or is_input_qtensor is None:
             op_inner = quantlinear(g, input, qparam_dict['scale_x_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
-            input_list = [op_inner, weights]
+            input_list = [op_inner, weight]
         else:
-            input_list = [input, weights]
+            input_list = [input, weight]
         if bias is not None:
             input_list.append(bias)
         return g.op(
@@ -33,8 +33,8 @@ class QConvTransposeBN1dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
-@register_qmodule(ConvTransposeBN1d)
-@register_qmodule(CConvTransposeBN1d)
+# @register_qmodule(ConvTransposeBN1d)
+# @register_qmodule(CConvTransposeBN1d)
 class QConvTransposeBN1d(QModuleMixin, CConvTransposeBN1d):
     @classmethod
     def qcreate(
@@ -117,7 +117,7 @@ class QConvTransposeBN1d(QModuleMixin, CConvTransposeBN1d):
                         self.bn.weight.unsqueeze(1) + self.bn.bias.unsqueeze(1))
             bn_rlt = bn_rlt.view(C, N, H).permute(1, 0, 2).contiguous()
             w_bn_ = self.bn.weight.div(torch.sqrt(unbias_var_ + self.bn.eps))
-            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1))
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:
@@ -148,7 +148,7 @@ class QConvTransposeBN1d(QModuleMixin, CConvTransposeBN1d):
             output = alpha * bn_rlt + (1 - alpha) * new_conv_rlt
         else:
             w_bn_ = self.bn.weight.div(torch.sqrt(self.bn.eps + self.bn.running_var))
-            new_weight = self.conv.weight.mul(w_bn_.view(1, -1, 1))
+            new_weight = self.conv.weight.mul(w_bn_.view(-1, 1, 1))
             if self.conv.bias is not None:
                 b_conv_ = self.conv.bias
             else:

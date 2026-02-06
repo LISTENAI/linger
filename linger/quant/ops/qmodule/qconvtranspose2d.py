@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
+from ....constrain import ConvTransposeBN2d, CConvTransposeBN2d
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
 
@@ -30,6 +31,8 @@ class QConvTranspose2dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
+@register_qmodule(ConvTransposeBN2d)
+@register_qmodule(CConvTransposeBN2d)
 @register_qmodule(torch.nn.ConvTranspose2d)
 class QConvTranspose2d(QModuleMixin, torch.nn.ConvTranspose2d):
     @classmethod
@@ -42,25 +45,46 @@ class QConvTranspose2d(QModuleMixin, torch.nn.ConvTranspose2d):
         constrain: Optional[Dict[str, Any]] = None,
         device: Optional[Dict[str, Any]] = None,
     ):
-        return cls(
-            in_channels=module.in_channels,
-            out_channels=module.out_channels,
-            kernel_size=module.kernel_size,
-            stride=module.stride,
-            padding=module.padding,
-            output_padding=module.output_padding,
-            groups=module.groups,
-            bias=module.bias is not None,
-            dilation=module.dilation,
-            padding_mode=module.padding_mode,
-            dtype=module.weight.dtype,
+        if "ConvTransposeBN2d" in module._get_name():
+            return cls(
+                in_channels=module.conv.in_channels,
+                out_channels=module.conv.out_channels,
+                kernel_size=module.conv.kernel_size,
+                stride=module.conv.stride,
+                padding=module.conv.padding,
+                output_padding=module.conv.output_padding,
+                groups=module.conv.groups,
+                bias=True,
+                dilation=module.conv.dilation,
+                padding_mode=module.conv.padding_mode,
+                dtype=module.conv.weight.dtype,
+                
+                device=device,
+                activations_cfg=activations_cfg,
+                weights_cfg=weights_cfg,
+                bias_cfg=bias_cfg,
+                constrain=constrain, 
+            )
+        else:
+            return cls(
+                in_channels=module.in_channels,
+                out_channels=module.out_channels,
+                kernel_size=module.kernel_size,
+                stride=module.stride,
+                padding=module.padding,
+                output_padding=module.output_padding,
+                groups=module.groups,
+                bias=module.bias is not None,
+                dilation=module.dilation,
+                padding_mode=module.padding_mode,
+                dtype=module.weight.dtype,
 
-            device=device,
-            activations_cfg=activations_cfg,
-            weights_cfg=weights_cfg,
-            bias_cfg=bias_cfg,
-            constrain = constrain, 
-        )
+                device=device,
+                activations_cfg=activations_cfg,
+                weights_cfg=weights_cfg,
+                bias_cfg=bias_cfg,
+                constrain = constrain, 
+            )
 
     def forward(self, input: torch.Tensor, output_size: Optional[List[int]] = None) -> torch.Tensor:
         if torch.onnx.is_in_onnx_export():

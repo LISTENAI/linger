@@ -40,7 +40,7 @@ if version_maj*100+version_min*10 + version_patch >= 151:
 
 setup(
     name="linger",
-    version="3.0.4",
+    version="3.0.5",
     description="linger is package of fix training",
     author="ListenAI",
     ext_modules=[

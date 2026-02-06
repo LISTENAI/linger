@@ -8,6 +8,16 @@ from ..config  import QUANT_CONFIGS
 from ..utils import QuantMode, QuantStrategy, ActivationType, FakeQuantMethod, QatMethod, PlatForm
 import lingerext
 
+
+def lp_loss(pred, tgt, p=2.0, reduction='none'):
+    """
+    loss function measured in L_p Norm
+    """
+    if reduction == 'none':
+        return (pred - tgt).abs().pow(p).sum(1).mean()
+    else:
+        return (pred - tgt).abs().pow(p).mean()
+
 class FakeQuantOnnxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
@@ -72,12 +82,6 @@ class BIASQUANT_WITH_GRAD_SACLE(torch.autograd.Function):
         return gradOutput.masked_fill(mask, 0.0), None, grad_scale, None, None, None
 
 
-
-
-
-"""
-TODO:假如我要加入一个不必将scale约束至2的幂次方、或perchennel的Quantiezer该怎么实现代码比较整洁呢？
-"""
 class Quantizer(torch.nn.Module, ):
     def __init__(self, quantizer_cfg: Optional[Dict[str, Any]] = None, constrain: Optional[Dict[str, Any]] = None):
         super(Quantizer, self).__init__()
@@ -89,13 +93,16 @@ class Quantizer(torch.nn.Module, ):
         self.qat_method = QUANT_CONFIGS.quant_info.qat_method
         
         # TQT策略使用，learning_data可学习，通过校准进行初始化
-        self.learning_data = torch.nn.parameter.Parameter(torch.tensor([2.1]), )
-        self.register_buffer("is_calibrate", torch.tensor(False, dtype=bool))
-
-        # MOM策略使用，running_data统计input.abs().max()获得
-        self.register_buffer("running_data", torch.tensor(0.0))
-        self.momentum = 0.1
-
+        if self.qat_method == QatMethod.TQT:
+            self.learning_data = torch.nn.parameter.Parameter(torch.tensor([2.1]), )
+            self.register_buffer("is_calibrate", torch.tensor(False, dtype=bool))
+        elif self.qat_method == QatMethod.MOM:
+            # MOM策略使用，running_data统计input.abs().max()获得
+            self.register_buffer("running_data", torch.tensor(0.0))
+            self.register_buffer("is_init", torch.tensor(False, dtype=bool))
+            self.momentum = 0.1
+        else:
+            raise ValueError("Only TQT and MOM strategies are supported! ")
         # TQT和MOM训练时都更新scale(因为bias可能会调用当前训练步骤的scale); 推理时都通过scale(MOM为通过running_data保存的)计算以加快推理速度
         # MOM正确的scale（统计的running_data对应的scale）通过重写self.state_dict()函数保存的checkpoint中，故推理可直接使用scale;TQT一直都是正确的scale
         self.register_buffer("scale", torch.tensor(1.0))
@@ -111,7 +118,11 @@ class Quantizer(torch.nn.Module, ):
             tensor.data = tensor if clamp_data is None else torch.clamp(tensor, min = -clamp_data, max = clamp_data)
 
         calibrate_function = get_calibrate_function(self.calibrate_name)
-        calibrate_function(self, tensor, self.data_bits)
+        if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+            calibrate_tensor = torch.nn.functional.relu(tensor)
+        else:
+            calibrate_tensor = tensor
+        calibrate_function(self, calibrate_tensor, self.data_bits)
         return tensor
     
     def quant_round(self, x, mode):
@@ -128,12 +139,21 @@ class Quantizer(torch.nn.Module, ):
             if self.qat_method == QatMethod.TQT:
                 learning_data_temp = self.data_bits - 1 - self.learning_data
             elif self.qat_method == QatMethod.MOM:
-                abs_max = input.abs().max()
-                self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
-                learning_data_temp = self.data_bits - 1 - abs_max.log2()
+                if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+                    abs_max = input.max()
+                else:
+                    abs_max = input.abs().max()
+                abs_max = abs_max.clamp(min=1e-6).detach()
+                if not self.is_init:
+                    self.running_data = abs_max
+                    self.is_init.fill_(True)
+                else:
+                    self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+                learning_data_temp = self.data_bits - 1 - self.running_data.log2()
+                # self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
             else:
                 raise ValueError("Only TQT and MOM strategies are supported! ")
-            learning_data = self.quant_round(learning_data_temp, self.round_mode)
+            learning_data = self.quant_round(learning_data_temp, QuantMode.round) #self.round_mode
             scale = 2**learning_data
             # scale = scale.clamp(min=1e-6, max=2**24)
         else:
@@ -153,6 +173,46 @@ class Quantizer(torch.nn.Module, ):
 
         return fake_input
 
+    def fake_quant_native_mse(self, input, scale_bias = None):
+        if scale_bias is None:
+            if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+                abs_max = input.max()
+            else:
+                abs_max = input.abs().max()
+            abs_max = abs_max.clamp(min=1e-6).detach()
+            if not self.is_init:
+                self.running_data = abs_max
+                self.is_init.fill_(True)
+            else:
+                self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+
+            scale_top = self.quant_max / self.running_data
+            scale_top = 2**self.quant_round(torch.log2(scale_top), QuantMode.ceil).double()
+            inputs_q_top = (self.quant_round(input * scale_top, self.round_mode).clamp(
+                self.quant_min, self.quant_max)) / scale_top
+            scale_bottom = self.quant_max / self.running_data
+            scale_bottom = 2**self.quant_round(torch.log2(scale_bottom), QuantMode.floor).double()
+            inputs_q_bottom = (self.quant_round(input * scale_bottom, self.round_mode).clamp(
+                self.quant_min, self.quant_max)) / scale_bottom
+            score_top = lp_loss(input, inputs_q_top, p=2.4, reduction='all')
+            score_bottom = lp_loss(input, inputs_q_bottom, p=2.4, reduction='all')
+
+            scale = (scale_top if score_top < score_bottom else scale_bottom).float()
+            
+        else:
+            scale = scale_bias
+        
+        scale = scale.clamp(min=1e-6, max=2**24)
+
+        x_s = input * scale
+        x_int = self.quant_round(x_s, self.round_mode)
+        x_int = x_int.clamp(self.quant_min, self.quant_max)
+        fake_input =  x_int / scale
+
+        self.scale.fill_(float(scale))
+
+        return fake_input
+
     def fake_quant_cuda(self, input, scale_bias = None):
         if hasattr(self, "min_scale"): # 只有add算子的outputquantizer有min_scale，其余情况min_scale和正常的scale相同
             min_scale = self.min_scale
@@ -163,9 +223,17 @@ class Quantizer(torch.nn.Module, ):
             if self.qat_method == QatMethod.TQT:
                 out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, self.learning_data, min_scale, self.quant_min, self.quant_max)
             elif self.qat_method == QatMethod.MOM:
-                abs_max = input.abs().max()
-                self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
-                out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, abs_max.log2(), min_scale, self.quant_min, self.quant_max)
+                if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+                    abs_max = input.max()
+                else:
+                    abs_max = input.abs().max()
+                abs_max = abs_max.clamp(min=1e-6).detach()
+                if not self.is_init:
+                    self.running_data = abs_max
+                    self.is_init.fill_(True)
+                else:
+                    self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+                out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, self.running_data.log2(), min_scale, self.quant_min, self.quant_max)
         else:
             out = BIASQUANT.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
             scale_tmp = scale_bias.detach()
@@ -182,9 +250,17 @@ class Quantizer(torch.nn.Module, ):
             if self.qat_method == QatMethod.TQT:
                 out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, self.learning_data, min_scale, self.quant_min, self.quant_max)
             elif self.qat_method == QatMethod.MOM:
-                abs_max = input.abs().max()
-                self.running_data.mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
-                out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, abs_max.log2(), min_scale, self.quant_min, self.quant_max)
+                if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+                    abs_max = input.max()
+                else:
+                    abs_max = input.abs().max()
+                abs_max = abs_max.clamp(min=1e-6).detach()
+                if not self.is_init:
+                    self.running_data = abs_max
+                    self.is_init.fill_(True)
+                else:
+                    self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+                out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, self.running_data.log2(), min_scale, self.quant_min, self.quant_max)
         else:
             out = BIASQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
             scale_tmp = scale_bias.detach()

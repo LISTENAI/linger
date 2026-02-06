@@ -41,7 +41,6 @@ with torch.no_grad():
 
 ## config.yaml 介绍
 * 基础配置
-    calibration: false  # 校准开关
     clamp_info: # 约束信息配置
         clamp_activation_value: 8   # 激活约束浮点值，8代表约束到[-8, 8]
         clamp_bias_value: null      # bias约束浮点值，默认值为None

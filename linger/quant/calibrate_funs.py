@@ -28,11 +28,11 @@ def abs_max_init(self, tensor, *args):
     with torch.no_grad():
         if self.is_calibrate:
             raise ValueError("Quantizer has beem calibrated! ")
-        self.learning_data.fill_(tensor.abs().max().log2())
+        self.learning_data.fill_(tensor.abs().max().clamp(min=1e-6).log2())
         learning_data = self.data_bits - 1 - self.learning_data.squeeze(0)
         learning_data = self.quant_round(learning_data, self.round_mode)
         scale = 2**learning_data
-        self.scale = scale.clamp(min=1e-6, max=2**24)
+        # self.scale = scale.clamp(min=1e-6, max=2**24)
         self.is_calibrate.fill_(True)
 
 @register_calibrate_method('top_10')
@@ -43,11 +43,11 @@ def top_10_init(self, tensor, *args):
         if tensor.numel() > 11:
             self.learning_data.fill_((torch.topk(tensor.abs().flatten(), 10)[0][-1]).log2())
         else: # 可能有的激活没有10个元素
-            self.learning_data.fill_(tensor.abs().max().log2())
+            self.learning_data.fill_(tensor.abs().max().clamp(min=1e-6).log2())
         learning_data = self.data_bits - 1 - self.learning_data.squeeze(0)
         learning_data = self.quant_round(learning_data, self.round_mode)
         scale = 2**learning_data
-        self.scale.fill_(scale.clamp(min=1e-6, max=2**24))
+        # self.scale.fill_(scale.clamp(min=1e-6, max=2**24))
         self.is_calibrate.fill_(True)
 
 

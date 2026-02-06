@@ -204,30 +204,6 @@ def shape(inputs, kwargs):
     return torch.tensor(list(inputs[0].shape), dtype=torch.int64)
 
 
-@register_op(op_type="Gather")
-def gather(inputs, kwargs):
-    axis = kwargs.get('axis',0)
-    
-    if_torch = isinstance(inputs[0], torch.Tensor)
-    if not isinstance(inputs[0], torch.Tensor):
-        inputs[0] = torch.tensor(inputs[0]) if not isinstance(inputs[0], np.ndarray) else torch.from_numpy(inputs[0].copy())
-    if not isinstance(inputs[1], torch.Tensor):
-        inputs[1] = torch.tensor(inputs[1]) if not isinstance(inputs[1], np.ndarray) else torch.from_numpy(inputs[1].copy())
-
-    if inputs[1].numel() == 1: # example : a = torch.randn([1,3,224,224]); a[:,:,2]
-        slice_list = [":"]*inputs[0].ndim
-        slice_list[axis] = str(inputs[1].item())
-        slice_str = ','.join(slice_list)
-        output = eval("inputs[0][{}]".format(slice_str))
-    else:
-        inputs[0] = inputs[0].transpose(0,axis)
-        # output = F.embedding(torch.LongTensor(inputs[1]),inputs[0])
-        output = inputs[0][inputs[1]]
-        output =  output.transpose(axis, 0)
-
-    return output
-
-
 @register_op(op_type='BatchNormalization')
 def batchnormalization(inputs, kwargs):
     epsilon = get_param(kwargs, 'epsilon')

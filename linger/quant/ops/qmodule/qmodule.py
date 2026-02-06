@@ -9,6 +9,7 @@ from ..qconfig import _QMODULE_TABLE
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....config import QUANT_CONFIGS
+from ....utils import PlatForm, ActivationType, LINGER_ACTIVATION_TYPE
 
 __all__ = ["QModuleMixin"]
 
@@ -34,6 +35,31 @@ class QModuleMixin(ABC):
             )
         # This will setup the torch.nn.Module
         super().__init__(*args, **kwargs) # 原始linear或conv等线性module的初始化
+        if hasattr(self, "kernel_size") and self.kernel_size is not None:
+            if QUANT_CONFIGS.platform in {PlatForm.venusA, PlatForm.arcs, PlatForm.mars}:
+                for k in self.kernel_size:
+                    assert 1 <= k <= 12, "kernel size of venusA/arcs/mars should be in range [1, 12]"
+            elif QUANT_CONFIGS.platform in {PlatForm.venus}:
+                for k in self.kernel_size:
+                    assert 1 <= k <= 5, "kernel size of venus should be in range [1, 5]"
+
+        if hasattr(self, "stride") and self.stride is not None:
+            for k in self.stride:
+                assert k in {1, 2, 4}, "stride of venus/arcs/mars/vensA should be in [1, 2, 4]"
+
+        if hasattr(self, "padding") and self.padding is not None:
+            if QUANT_CONFIGS.platform in {PlatForm.venusA, PlatForm.arcs, PlatForm.mars}:
+                if isinstance(self.padding, (list, tuple)):
+                    for k in self.padding:
+                        assert 0 <= k <= 11, "padding of venusA/arcs/mars should be in range [0, 11]"
+                else:
+                    assert 0 <= self.padding <= 11, "padding of venusA/arcs/mars should be in range [0, 11]"
+            elif QUANT_CONFIGS.platform in {PlatForm.venus}:
+                if isinstance(self.padding, (list, tuple)):
+                    for k in self.padding:
+                        assert 0 <= k <= 4, "padding of venus should be in range [0, 4]"
+                else:
+                    assert 0 <= self.padding <= 4, "padding of venus should be in range [0, 4]"
 
         if weights_cfg is not None:
             self.weight_quantizer = WQuantizer(weights_cfg, constrain)
@@ -41,12 +67,13 @@ class QModuleMixin(ABC):
             self.bias_quantizer = BQuantizer(bias_cfg, constrain)
 
         self._quantize_hooks = {}
-        if open_ihook:
-            self.input_quantizer  = AQuantizer(activations_cfg, None)
-            self._quantize_hooks["input"] = self.register_forward_pre_hook(self.quantize_input)
         if open_ohook:
             self.output_quantizer = AQuantizer(activations_cfg, constrain)
             self._quantize_hooks["output"] = self.register_forward_hook(self.quantize_output)
+        if open_ihook:
+            activations_cfg.pop("activation_type", None)    # 输入不需要判断激活类型
+            self.input_quantizer  = AQuantizer(activations_cfg, None)
+            self._quantize_hooks["input"] = self.register_forward_pre_hook(self.quantize_input)
 
     @classmethod
     def from_module(
@@ -61,6 +88,8 @@ class QModuleMixin(ABC):
         bias_cfg = kwargs.get('bias_cfg', None)
         constrain = kwargs.get('constrain', None)
         device = QUANT_CONFIGS.device
+        activation_type = getattr(module, LINGER_ACTIVATION_TYPE, ActivationType.none)
+        activations_cfg['activation_type'] = activation_type
         qmodule = cls.qcreate(module, activations_cfg, weights_cfg, bias_cfg, constrain, device=device)
         if qmodule is None:
             return None
@@ -120,6 +149,9 @@ class QModuleMixin(ABC):
         input: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        if self.training and self.output_quantizer.clamp_value is not None:
+            clamp_value = self.output_quantizer.clamp_value
+            output = output.clamp(-clamp_value, clamp_value)
         fake_out = self.output_quantizer(output)
         return from_tensor_to_qtensor(fake_out, self.output_quantizer.scale, self.output_quantizer.data_bits)
 

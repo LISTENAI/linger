@@ -1,18 +1,16 @@
 ## 校准（PTQ）使用方法
 * 因为校准时会默认按照weight的clip配置进行weight的初始化，故暂不支持循环多组数据校准（仅支持一轮输入校准）
 * 校准时会创建add、bmm等小算子的module
-```python
-    @linger.register_calibrate_method('custom_calibration')
-    def test_init(self, tensor):
-        with torch.no_grad():
-            self.learning_data.fill_(torch.tensor(-999))
-            self.scale.fill_(torch.tensor(-999))
-            self.is_calibrate.fill_(True)
-    
-    
-    with linger.calibration(a_calibrate_name="custom_calibration", w_calibrate_name="custom_calibration"):
-        model = linger.init(model)
-        model(torch.load("/yrfs4/inference/sqtu2/LLM/code/linger3.0/my_linger/calibrate_input.pt"))  
+```python    
+    # 修改cfg.yaml，通过a_calibrate_name和w_calibrate_name设置校准方法，推荐使用默认配置即可；
+    # 量化配置
+    model = linger.init(model, config_file = 'cfg.yaml')
+    # 加载预训练模型
+    model.load_state_dict("./pre_train.pt")
+    with linger.calibration():  # 校准开关
+        model(torch.load("/yrfs4/inference/sqtu2/LLM/code/linger3.0/my_linger/calibrate_input.pt")) # 走一遍前向，开始校准
+
+    # 开始量化训练
 ```
 
 ## linger.init/constrain中'disable_module'使用方法
@@ -30,7 +28,6 @@
 ## linger.init中可通过yaml文件加载配置，当前配置可通过linger.config_save_to_yaml保存
 ## config.yaml 介绍
 * 基础配置
-    calibration: false  # 校准开关
     clamp_info: # 约束信息配置
         clamp_activation_value: 8   # 激活约束浮点值，8代表约束到[-8, 8]
         clamp_bias_value: null      # bias约束浮点值，默认值为None

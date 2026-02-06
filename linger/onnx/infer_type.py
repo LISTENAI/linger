@@ -44,7 +44,7 @@ class QMul(OpBase):
 
     def infer_type(self, in_type):
         tensor_type_map = {}
-        assert (in_type[0] in [2, 3]) and (in_type[1] in [1, 2, 3])
+        assert (in_type[0] in [0, 1, 2, 3]) and (in_type[1] in [0, 1, 2, 3])
         for output in self.node.output:
             tensor_type_map[output] = 3
         return tensor_type_map
@@ -56,7 +56,7 @@ class QCat(OpBase):
     def infer_type(self, in_type):
         tensor_type_map = {}
         for index in range(len(in_type)):
-            assert in_type[index] == 3
+            assert in_type[index] in [0, 1, 2, 3]
         for output in self.node.output:
             tensor_type_map[output] = in_type[0]
         return tensor_type_map
@@ -152,7 +152,7 @@ class QConv(OpBase):
 
     def infer_type(self, in_type):
         tensor_type_map = {}
-        assert in_type[0] == 3  # and in_type[1] == 3
+        assert in_type[1] == 3  # and in_type[1] == 3
         count = 0
         out_type = 3
         for attr in self.node.attribute:
@@ -175,7 +175,7 @@ class QConvTranspose(OpBase):
 
     def infer_type(self, in_type):
         tensor_type_map = {}
-        assert in_type[0] == 3  # and in_type[1] == 3
+        assert in_type[1] == 3  # and in_type[1] == 3
         count = 0
         out_type = 3
         for attr in self.node.attribute:
@@ -384,7 +384,7 @@ class Relu(OpBase):
     def infer_type(self, in_type):
         tensor_type_map = {}
         # corresponding with 1.7 onnxruntime doc
-        assert in_type[0] in [1, 10, 11, 3, 6]
+        assert in_type[0] in [0, 1, 10, 11, 3, 6]
         for output in self.node.output:
             tensor_type_map[output] = in_type[0]
         return tensor_type_map
@@ -409,7 +409,7 @@ class Slice(OpBase):
 
     def infer_type(self, in_type):
         tensor_type_map = {}
-        assert in_type[0] in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        assert in_type[0] in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
                               12, 13, 16]  # corresponding with 1.7 onnxruntime doc
         assert in_type[1] in [1, 6, 7]
         # corresponding with 1.7 onnxruntime doc
@@ -471,7 +471,7 @@ class Shape(OpBase):
     def infer_type(self, in_type):
         tensor_type_map = {}
         # corresponding with 1.7 onnxruntime doc
-        assert in_type[0] in [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 16]
+        assert in_type[0] in [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 16]
         for output in self.node.output:
             tensor_type_map[output] = find_key('int64')
         return tensor_type_map
@@ -564,6 +564,8 @@ op_map = {
           'QConvBN2d': QConv,
           'QConvTranspose1d': QConvTranspose,
           'QConvTranspose2d': QConvTranspose,
+          'QConvTransposeBN1d': QConvTranspose,
+          'QConvTransposeBN2d': QConvTranspose,
           'QBatchNorm1d': QBatchNorm,
           'QBatchNorm2d': QBatchNorm,
           'QLayerNorm': QLayerNorm,

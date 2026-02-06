@@ -1,12 +1,9 @@
 import torch
 import torch.nn as nn
 
-from .utils import Singleton, ActivationType, get_device
+from .utils import Singleton, ActivationType, get_device, LINGER_ACTIVATION_TYPE, LINGER_IGNORE_PAMAMTER
 from .constrain import ConvBN1d, ConvBN2d, ConvTransposeBN1d, ConvTransposeBN2d
 from .config import QUANT_CONFIGS
-
-LINGER_IGNORE_PAMAMTER = "_linger_ignore_parameter"
-LINGER_ACTIVATION_TYPE = "_linger_activation_type"
 
 class FuseableConvBN():
     def __init__(self, conv_f, conv, bn_f, bn, root_model=None):
@@ -277,7 +274,8 @@ def find_adjoin_adjoin_layer(src_node_name, mid_node_name, may_be_dst_layers, di
 def filter_layers(node_arr, op_name):
     list_node = []
     for n in node_arr:
-        if n.op == op_name:
+        # if n.op == op_name:
+        if op_name in n.op:
             list_node.append(n)
     return list_node
 
