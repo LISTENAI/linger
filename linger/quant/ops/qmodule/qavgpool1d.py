@@ -3,10 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .qmodule import QModuleMixin
+from .qavgpool_chip import simulate_avgpool1d
 from ..qconfig import register_qmodule
-from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
-from typing import Optional, Union, Dict, Any
+from ....utils import QuantMode
+from typing import Optional, Dict, Any
 
 class QAvgPool1dOnnxFunction(torch.autograd.Function):
     @staticmethod
@@ -62,7 +63,7 @@ class QAvgPool1d(QModuleMixin, nn.AvgPool1d):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
             return QAvgPool1dOnnxFunction.apply(input, self.kernel_size, self.stride, self.padding, self.ceil_mode, self.count_include_pad, qparam_dict)
-        return F.avg_pool1d(
+        ref_out = F.avg_pool1d(
             input,
             self.kernel_size,
             self.stride,
@@ -70,5 +71,23 @@ class QAvgPool1d(QModuleMixin, nn.AvgPool1d):
             self.ceil_mode,
             self.count_include_pad,
         )
+        input_scale = 1.0
+        round_mode = QuantMode.floor_add
+        if hasattr(self, "input_quantizer"):
+            input_scale = float(self.input_quantizer.scale)
+            round_mode = self.input_quantizer.round_mode
+        aligned_out = simulate_avgpool1d(
+            input,
+            scale=input_scale,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
+            padding=self.padding,
+            ceil_mode=self.ceil_mode,
+            count_include_pad=self.count_include_pad,
+            divisor_override=None,
+            round_mode=round_mode,
+        )
+        if self.training:
+            return ref_out + (aligned_out - ref_out).detach()
+        return aligned_out
         
-

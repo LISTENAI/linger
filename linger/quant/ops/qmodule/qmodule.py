@@ -36,15 +36,21 @@ class QModuleMixin(ABC):
         # This will setup the torch.nn.Module
         super().__init__(*args, **kwargs) # 原始linear或conv等线性module的初始化
         if hasattr(self, "kernel_size") and self.kernel_size is not None:
+            kernel_size = self.kernel_size
+            if isinstance(kernel_size, int):
+                kernel_size = (kernel_size,)
             if QUANT_CONFIGS.platform in {PlatForm.venusA, PlatForm.arcs, PlatForm.mars}:
-                for k in self.kernel_size:
+                for k in kernel_size:
                     assert 1 <= k <= 12, "kernel size of venusA/arcs/mars should be in range [1, 12]"
             elif QUANT_CONFIGS.platform in {PlatForm.venus}:
-                for k in self.kernel_size:
+                for k in kernel_size:
                     assert 1 <= k <= 5, "kernel size of venus should be in range [1, 5]"
 
         if hasattr(self, "stride") and self.stride is not None:
-            for k in self.stride:
+            stride = self.stride
+            if isinstance(stride, int):
+                stride = (stride,)
+            for k in stride:
                 assert k in {1, 2, 4}, "stride of venus/arcs/mars/vensA should be in [1, 2, 4]"
 
         if hasattr(self, "padding") and self.padding is not None:

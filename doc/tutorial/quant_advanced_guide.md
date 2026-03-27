@@ -6,7 +6,7 @@
     # 量化配置
     model = linger.init(model, config_file = 'cfg.yaml')
     # 加载预训练模型
-    model.load_state_dict("./pre_train.pt")
+    model.load_state_dict(torch.load("./pre_train.pt"))
     with linger.calibration():  # 校准开关
         model(torch.load("/yrfs4/inference/sqtu2/LLM/code/linger3.0/my_linger/calibrate_input.pt")) # 走一遍前向，开始校准
 

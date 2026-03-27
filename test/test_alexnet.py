@@ -18,9 +18,9 @@ import linger
 torch.manual_seed(42)
 np.random.seed(42)
 
-# ======================
-# 1. 定义AlexNet模型 (适配CIFAR-10)
-# ======================
+# ============================================
+# 定义AlexNet模型 (适配CIFAR-10数据集)
+# ============================================
 class AlexNet(nn.Module):
     def __init__(self, num_classes=10):
         super(AlexNet, self).__init__()
@@ -86,9 +86,9 @@ class AlexNet(nn.Module):
         out = self.classifier(x_flat)
         return out
 
-# ======================
-# 2. 数据准备 (使用已下载的cifar-10-python.tar.gz)
-# ======================
+# ============================================
+# 数据准备 (使用已下载的cifar-10-python.tar.gz)
+# ============================================
 def extract_cifar10(tar_path, extract_path='./data'):
     """
     解压已下载的CIFAR-10数据集
@@ -168,9 +168,9 @@ def get_cifar10_data(tar_path, batch_size=128):
     
     return trainloader, testloader, data_dir
 
-# ======================
-# 3. 训练函数
-# ======================
+# ============================================
+# 模型训练
+# ============================================
 def train(model, trainloader, criterion, optimizer, device, epoch):
     model.train()
     running_loss = 0.0
@@ -199,9 +199,9 @@ def train(model, trainloader, criterion, optimizer, device, epoch):
     
     return running_loss / len(trainloader), 100. * correct / total
 
-# ======================
-# 4. 测试函数
-# ======================
+# ============================================
+# 模型效果测试
+# ============================================
 def test(model, testloader, criterion, device):
     model.eval()
     test_loss = 0
@@ -223,9 +223,9 @@ def test(model, testloader, criterion, device):
     print(f'Test Loss: {test_loss/len(testloader):.4f} | Test Acc: {acc:.2f}%')
     return test_loss / len(testloader), acc
 
-# ======================
-# 5. ONNX导出与验证
-# ======================
+# ============================================
+# 量化ONNX计算图导出与验证
+# ============================================
 def export_to_onnx(model, device, onnx_path='alexnet_cifar10.onnx'):
     # 设置为评估模式
     model.eval()
@@ -234,7 +234,7 @@ def export_to_onnx(model, device, onnx_path='alexnet_cifar10.onnx'):
     dummy_input = torch.randn(1, 3, 32, 32).to(device)
     
     # 导出ONNX模型
-    torch.onnx.export(
+    linger.onnx.export(
         model, 
         dummy_input,
         onnx_path,
@@ -242,11 +242,7 @@ def export_to_onnx(model, device, onnx_path='alexnet_cifar10.onnx'):
         opset_version=11,
         do_constant_folding=True,
         input_names=['input'],
-        output_names=['output'],
-        dynamic_axes={
-            'input': {0: 'batch_size'},
-            'output': {0: 'batch_size'}
-        }
+        output_names=['output']
     )
     
     print(f"ONNX模型已导出至: {onnx_path}")
@@ -289,16 +285,19 @@ def export_to_onnx(model, device, onnx_path='alexnet_cifar10.onnx'):
     # assert torch_pred == onnx_pred, "PyTorch和ONNX预测结果不一致!"
     print("ONNX推理验证成功!")
 
-# ======================
-# 6. 主函数
-# ======================
+# ============================================
+# 主函数，浮点训练+量化训练+ONNX导出示例
+# ============================================
 def main():
     # 超参数设置
     BATCH_SIZE = 128
-    EPOCHS = 20
-    LR = 0.01
-    MODEL_PATH = 'alexnet_cifar10.pth'
-    ONNX_PATH = 'alexnet_cifar10.onnx'
+    EPOCHS_FLOAT = 100  #浮点训练轮数
+    EPOCHS_QUANT = 50   #量化训练轮数
+    LR = 0.1           #训练学习率，量化训练学习率通常较小
+    FLOAT_MODEL_PATH = 'alexnet_cifar10.pth'
+    CONSTRAIN_MODEL_PATH = 'alexnet_cifar10_constrain.pth'
+    QUANT_MODEL_PATH = 'alexnet_cifar10_quant.pth'
+    ONNX_PATH = 'alexnet_cifar10_quant.onnx'
     
     # 设备配置
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -339,10 +338,7 @@ def main():
     
     # 初始化模型
     model = AlexNet(num_classes=10).to(device)
-    print("\n模型结构:\n", model)
-
-    model = linger.init(model)
-    print(model)
+    # print("\n模型结构:\n", model)
     
     # 损失函数和优化器
     criterion = nn.CrossEntropyLoss()
@@ -351,13 +347,13 @@ def main():
         optimizer, mode='max', factor=0.5, patience=2, verbose=True
     )
     
-    # 训练循环
+    # ******** 浮点训练 ********
     best_acc = 0
     print("\n" + "="*50)
-    print("开始训练...")
+    print("开始浮点训练...")
     print("="*50)
     
-    for epoch in range(EPOCHS):
+    for epoch in range(EPOCHS_FLOAT):
         train_loss, train_acc = train(model, trainloader, criterion, optimizer, device, epoch)
         test_loss, test_acc = test(model, testloader, criterion, device)
         
@@ -367,24 +363,90 @@ def main():
         # 保存最佳模型
         if test_acc > best_acc:
             best_acc = test_acc
-            torch.save(model.state_dict(), MODEL_PATH)
-            print(f"保存最佳模型至 {MODEL_PATH} (准确率: {best_acc:.2f}%)")
+            torch.save(model.state_dict(), FLOAT_MODEL_PATH)
+            # print(f"保存最佳模型至 {FLOAT_MODEL_PATH} (准确率: {best_acc:.2f}%)")
     
-    print(f"\n训练完成! 最佳测试准确率: {best_acc:.2f}%")
+    print(f"\n浮点训练完成! 最佳测试准确率: {best_acc:.2f}%")
     
-    # 加载最佳模型进行最终测试
-    model.load_state_dict(torch.load(MODEL_PATH))
+    # ******** 浮点测试 ********
+    model.load_state_dict(torch.load(FLOAT_MODEL_PATH))
     print("\n" + "="*50)
-    print("使用最佳模型进行最终测试:")
+    print("浮点模型效果测试:")
     print("="*50)
     test(model, testloader, criterion, device)
-    
-    # 导出ONNX模型
+
+    # ******** 约束训练 ********
+    config_file = './alexnet_config.yaml'
+    # linger.config_save_to_yaml(config_file)
+    model = linger.constrain(model, config_file=config_file)
+    optimizer = optim.SGD(model.parameters(), lr=LR, momentum=0.9, weight_decay=5e-4)
+
+    # 约束训练循环
+    best_acc = 0
     print("\n" + "="*50)
-    print("导出ONNX模型...")
+    print("开始约束训练...")
+    print("="*50)
+    for epoch in range(EPOCHS_QUANT):
+        train_loss, train_acc = train(model, trainloader, criterion, optimizer, device, epoch)
+        test_loss, test_acc = test(model, testloader, criterion, device)
+        
+        # 学习率调整
+        scheduler.step(test_acc)
+        
+        # 保存最佳模型
+        if test_acc > best_acc:
+            best_acc = test_acc
+            torch.save(model.state_dict(), QUANT_MODEL_PATH)
+            # print(f"保存最佳模型至 {QUANT_MODEL_PATH} (准确率: {best_acc:.2f}%)")
+    
+    print(f"\n约束训练完成! 最佳测试准确率: {best_acc:.2f}%")
+
+    # ******** 量化效果测试 ********
+    model.load_state_dict(torch.load(QUANT_MODEL_PATH))
+    print("\n" + "="*50)
+    print("浮点约束模型效果测试:")
+    print("="*50)
+    test(model, testloader, criterion, device)
+
+    # ******** 量化训练 ********
+    model = linger.init(model)
+    # print(model)
+    model.load_state_dict(torch.load(FLOAT_MODEL_PATH), strict=True)
+    optimizer = optim.SGD(model.parameters(), lr=LR*0.1, momentum=0.9, weight_decay=5e-4)
+    
+    # 量化训练循环
+    best_acc = 0
+    print("\n" + "="*50)
+    print("开始量化训练...")
+    print("="*50)
+    for epoch in range(EPOCHS_QUANT):
+        train_loss, train_acc = train(model, trainloader, criterion, optimizer, device, epoch)
+        test_loss, test_acc = test(model, testloader, criterion, device)
+        
+        # 学习率调整
+        scheduler.step(test_acc)
+        
+        # 保存最佳模型
+        if test_acc > best_acc:
+            best_acc = test_acc
+            torch.save(model.state_dict(), QUANT_MODEL_PATH)
+            # print(f"保存最佳模型至 {QUANT_MODEL_PATH} (准确率: {best_acc:.2f}%)")
+    
+    print(f"\n量化训练完成! 最佳测试准确率: {best_acc:.2f}%")
+
+    # ******** 量化效果测试 ********
+    model.load_state_dict(torch.load(QUANT_MODEL_PATH))
+    print("\n" + "="*50)
+    print("浮点模型效果测试:")
+    print("="*50)
+    test(model, testloader, criterion, device)
+
+    # ******** 量化ONNX图导出 ********
+    print("\n" + "="*50)
+    print("导出量化后的ONNX模型...")
     print("="*50)
     export_to_onnx(model, device, ONNX_PATH)
-    
+
     # 清理临时数据 (保留原始tar文件，只删除解压后的目录)
     print("\n" + "="*50)
     print("清理临时数据...")

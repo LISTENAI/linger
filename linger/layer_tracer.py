@@ -1,28 +1,57 @@
+"""基于 Hook 的算子融合 tracer，替代 JIT-based trace_layers。
+
+支持融合模式：convbn / convbnrelu / convrelu / bnrelu / linearrelu / linear_sigmoid / conv_sigmoid
+兼容 transformer 等含动态控制流的网络。
+
+权重加载：
+  方案B - 自动：load_state_dict 时 pre_hook 自动重映射 key
+  方案C - 显式：返回 CheckpointAdapter，可手动转换并序列化
+"""
+
 import torch
 import torch.nn as nn
+from typing import List
 
-from .utils import Singleton, ActivationType, get_device, LINGER_ACTIVATION_TYPE, LINGER_IGNORE_PAMAMTER
+from .utils import ActivationType, LINGER_ACTIVATION_TYPE, LINGER_IGNORE_PAMAMTER
 from .constrain import ConvBN1d, ConvBN2d, ConvTransposeBN1d, ConvTransposeBN2d
 from .config import QUANT_CONFIGS
 
+_LINGER_TRACED = '_linger_traced'
+_LINGER_TRACE_HOOK_HANDLE = '_linger_trace_hook_handle'
+
+# Conv 类型 -> 合法的 BN 类型
+_CONV_BN_MATCH = {
+    nn.Conv1d: nn.BatchNorm1d, nn.Conv2d: nn.BatchNorm2d,
+    nn.ConvTranspose1d: nn.BatchNorm1d, nn.ConvTranspose2d: nn.BatchNorm2d,
+}
+# Conv 类型 -> 融合后的 ConvBN 模块类
+_CONV_TO_FUSED = {
+    nn.Conv1d: ConvBN1d, nn.Conv2d: ConvBN2d,
+    nn.ConvTranspose1d: ConvTransposeBN1d, nn.ConvTranspose2d: ConvTransposeBN2d,
+}
+_BN_PARAMS = ('weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked')
+_CONV_PARAMS = ('weight', 'bias')
+
+
+# ==================== 与 layer_tracer.py 一致的基础类 ====================
+
 class FuseableConvBN():
+    """记录一对可融合的 Conv-BN 信息"""
     def __init__(self, conv_f, conv, bn_f, bn, root_model=None):
-        self.conv_f = conv_f
+        self.conv_f = conv_f        # conv 的父模块
         self.conv = conv
-        self.bn_f = bn_f
+        self.bn_f = bn_f            # bn 的父模块
         self.bn = bn
-        self.scope_conv = None
-        self.scope_bn = None
-        self.root_model = None
+        self.scope_conv = None      # conv 在模型树中的路径
+        self.scope_bn = None        # bn 在模型树中的路径
+        self.root_model = root_model
 
     def set_root_model(self, root_model):
         self.root_model = root_model
 
+
 class EmptyBatchNorm(torch.nn.Module):
-    r"""融合后的BNmoudule占位符,没有进行任何Tensor操作
-
-    """
-
+    """融合后 BN 的占位符，不做任何 Tensor 操作"""
     def __init__(self):
         super(EmptyBatchNorm, self).__init__()
         setattr(self, LINGER_IGNORE_PAMAMTER,
@@ -31,394 +60,342 @@ class EmptyBatchNorm(torch.nn.Module):
     def forward(self, input):
         return input
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata,
+                              strict, missing_keys, unexpected_keys, error_msgs):
         pass
 
-def fuse_conv_bn(conv, bn):
-    eps = 1e-5
-    c_b = getattr(conv, 'bias', None)
 
-    b_mean = bn.running_mean.data
-    b_var = bn.running_var.data
-    b_w = bn.weight.data
-    b_b = bn.bias.data
-    sigma = 1/torch.sqrt(b_var+eps)
-    alpha = b_w * sigma
-    beta = b_b - b_mean * alpha
-    conv.weight.data.mul_(alpha.view(-1, *([1]*(len(conv.weight.shape)-1))))
-    if c_b is not None:
-        conv.bias.data.mul_(alpha).add_(beta)
+# ==================== 执行记录器：hook + 全局操作计数 ====================
+
+class _OpCounterMode(torch.overrides.TorchFunctionMode):
+    """拦截所有 torch 操作递增计数器，用于检测 module 间的隐式操作"""
+    def __init__(self, counter_ref):
+        self._ref = counter_ref
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        self._ref[0] += 1
+        return func(*(args or ()), **(kwargs or {}))
+
+
+class _Rec:
+    """单次模块执行的快照"""
+    __slots__ = ('name', 'mod', 'out_id', 'out_ver', 'inp_id', 'inp_ver', 'seq')
+    def __init__(self, name, mod, inp_id, inp_ver, out_id, out_ver, seq):
+        self.name, self.mod = name, mod
+        self.inp_id, self.inp_ver = inp_id, inp_ver
+        self.out_id, self.out_ver = out_id, out_ver
+        self.seq = seq
+
+
+# 需要挂 hook 的模块类型
+_HOOK_TYPES = (
+    nn.Conv1d, nn.Conv2d, nn.ConvTranspose1d, nn.ConvTranspose2d,
+    nn.BatchNorm1d, nn.BatchNorm2d,
+    nn.ReLU, nn.Sigmoid, nn.Linear,
+)
+
+
+def _record_execution(model, *args):
+    """执行一次 forward，返回所有目标模块的执行记录"""
+    records = []
+    counter = [0]  # 用列表以便闭包可修改
+    hooks = []
+
+    def _make_hook(name):
+        def hook(mod, inp, out):
+            it = inp[0] if isinstance(inp, tuple) else inp
+            ot = out[0] if isinstance(out, tuple) else out
+            if isinstance(it, torch.Tensor) and isinstance(ot, torch.Tensor):
+                records.append(_Rec(name, mod, id(it), it._version,
+                                    id(ot), ot._version, counter[0]))
+        return hook
+
+    for name, mod in model.named_modules():
+        if isinstance(mod, _HOOK_TYPES):
+            hooks.append(mod.register_forward_hook(_make_hook(name)))
+
+    mode = _OpCounterMode(counter)
+    try:
+        mode.__enter__()
+        with torch.no_grad():
+            # training = model.training
+            # model.train()
+            model(*args)
+            # model.train(training)
+    finally:
+        mode.__exit__(None, None, None)
+        for h in hooks:
+            h.remove()
+    return records
+
+
+def _calc_gap_threshold(records):
+    """自动标定相邻 Conv-BN 之间正常 op 间隔，返回阈值"""
+    max_gap = 0
+    for i in range(len(records) - 1):
+        a, b = records[i], records[i + 1]
+        if _is_conv(a.mod) and _is_bn(b.mod):
+            if a.out_id == b.inp_id and a.out_ver == b.inp_ver:
+                max_gap = max(max_gap, b.seq - a.seq)
+    return int(max_gap * 1.5) + 1 if max_gap > 0 else 100
+
+
+# ==================== 邻接分析 ====================
+
+def _is_conv(m):
+    return isinstance(m, (nn.Conv1d, nn.Conv2d, nn.ConvTranspose1d, nn.ConvTranspose2d))
+
+def _is_bn(m):
+    return isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d))
+
+def _connected(a, b, gap):
+    """三重校验：tensor id + _version + op 间隔"""
+    return a.out_id == b.inp_id and a.out_ver == b.inp_ver and (b.seq - a.seq) <= gap
+
+def _get_parent(model, dotted_name):
+    """'a.b.c' -> (model.a.b, 'c')"""
+    parts = dotted_name.split('.')
+    parent = model
+    for p in parts[:-1]:
+        parent = getattr(parent, p)
+    return parent, parts[-1]
+
+
+def _analyze(records, gap, model, fuse_bn):
+    """分析执行记录，找出需要融合的 Conv-BN 对，同时标记 activation type。
+    返回 List[FuseableConvBN]（仅 convbn 融合对，activation 信息直接写在模块属性上）。
+    """
+    n = len(records)
+    pairs = []
+    fused_conv_ids, fused_bn_ids = set(), set()
+
+    # 第一遍：Conv -> BN 融合（含 Conv -> BN -> ReLU/Sigmoid）
+    if fuse_bn:
+        for i in range(n - 1):
+            a, b = records[i], records[i + 1]
+            if not (_is_conv(a.mod) and _is_bn(b.mod)):
+                continue
+            if not isinstance(b.mod, _CONV_BN_MATCH.get(type(a.mod), type(None))):
+                continue
+            if not _connected(a, b, gap):
+                continue
+            # 检查 BN 后是否紧跟 ReLU/Sigmoid
+            act = ActivationType.none
+            if i + 2 < n and _connected(b, records[i + 2], gap):
+                if isinstance(records[i + 2].mod, nn.ReLU):
+                    act = ActivationType.Relu
+                elif isinstance(records[i + 2].mod, nn.Sigmoid):
+                    act = ActivationType.Sigmoid
+            if act != ActivationType.none:
+                setattr(a.mod, LINGER_ACTIVATION_TYPE, act)
+            # 构建 FuseableConvBN
+            conv_f, _ = _get_parent(model, a.name)
+            bn_f, _ = _get_parent(model, b.name)
+            fb = FuseableConvBN(conv_f, a.mod, bn_f, b.mod)
+            fb.scope_conv, fb.scope_bn = a.name, b.name
+            pairs.append(fb)
+            fused_conv_ids.add(id(a.mod))
+            fused_bn_ids.add(id(b.mod))
+
+    # 第二遍：独立 Conv -> ReLU / Conv -> Sigmoid
+    for i in range(n - 1):
+        a, b = records[i], records[i + 1]
+        if _is_conv(a.mod) and id(a.mod) not in fused_conv_ids and _connected(a, b, gap):
+            if isinstance(b.mod, nn.ReLU):
+                setattr(a.mod, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
+            elif isinstance(b.mod, nn.Sigmoid):
+                setattr(a.mod, LINGER_ACTIVATION_TYPE, ActivationType.Sigmoid)
+
+    # 第三遍：独立 BN -> ReLU
+    for i in range(n - 1):
+        a, b = records[i], records[i + 1]
+        if _is_bn(a.mod) and id(a.mod) not in fused_bn_ids and _connected(a, b, gap):
+            if isinstance(b.mod, nn.ReLU):
+                setattr(a.mod, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
+
+    # 第四遍：Linear -> ReLU / Linear -> Sigmoid
+    for i in range(n - 1):
+        a, b = records[i], records[i + 1]
+        if isinstance(a.mod, nn.Linear) and _connected(a, b, gap):
+            if isinstance(b.mod, nn.ReLU):
+                setattr(a.mod, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
+            elif isinstance(b.mod, nn.Sigmoid):
+                setattr(a.mod, LINGER_ACTIVATION_TYPE, ActivationType.Sigmoid)
+
+    return pairs
+
+
+# ==================== 模块替换 ====================
+
+def _create_convbn(conv_m, bn_m):
+    """根据 Conv 类型创建对应的 ConvBN 融合模块"""
+    cls = _CONV_TO_FUSED[type(conv_m)]
+    has_bias = conv_m.bias is not None
+    kw = dict(
+        in_channels=conv_m.in_channels, out_channels=conv_m.out_channels,
+        kernel_size=conv_m.kernel_size, stride=conv_m.stride,
+        padding=conv_m.padding, groups=conv_m.groups,
+        bias=has_bias, padding_mode=conv_m.padding_mode,
+        eps=bn_m.eps, momentum=bn_m.momentum,
+        affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
+        constrain=None,
+    )
+    if isinstance(conv_m, (nn.ConvTranspose1d, nn.ConvTranspose2d)):
+        kw['output_padding'] = conv_m.output_padding
     else:
-        conv.bias = bn.bias
-        conv.bias.data.mul_(0).add_(beta)
+        kw['dilation'] = conv_m.dilation
+    return cls(**kw)
 
-class SingletonConvFusedBnModules(Singleton):
-    fused_conv_module = {}
-    fused_bn_module = {}
-    _is_close_register = False
 
-    def _close_register(self):
-        self._is_close_register = True
+def _apply_fusion(model, pairs):
+    """执行模块替换：Conv -> ConvBNXd, BN -> EmptyBatchNorm"""
+    device = QUANT_CONFIGS.device
+    for fb in pairs:
+        # 创建融合模块并拷贝 activation type
+        act = getattr(fb.conv, LINGER_ACTIVATION_TYPE, ActivationType.none)
+        convbn = _create_convbn(fb.conv, fb.bn).to(device)
+        setattr(convbn, LINGER_ACTIVATION_TYPE, act)
+        # 替换 conv -> ConvBNXd
+        conv_parent, conv_attr = _get_parent(model, fb.scope_conv)
+        setattr(conv_parent, conv_attr, convbn)
+        # 替换 bn -> EmptyBatchNorm
+        bn_parent, bn_attr = _get_parent(model, fb.scope_bn)
+        setattr(bn_parent, bn_attr, EmptyBatchNorm())
 
-    def _register(self, fuseable_conv_bn):
-        if self._is_close_register:
-            print("warning: module has initlized and linger.init may not work")
-        self.fused_conv_module[fuseable_conv_bn.conv] = fuseable_conv_bn
-        self.fused_bn_module[fuseable_conv_bn.bn] = fuseable_conv_bn
 
-    def _is_registered_conv(self, conv):
-        f_conv = self.fused_conv_module.get(conv)
-        return f_conv
+# ==================== 方案C: CheckpointAdapter ====================
 
-    def _is_registered_bn(self, bn):
-        f_bn = self.fused_bn_module.get(bn)
-        return f_bn
+class CheckpointAdapter:
+    """独立的 state_dict 格式转换器，可序列化保存。
 
-    def build_normalize_convbn2d_scope(self, model):
-        queue = [('', '', model)]
-        while len(queue) > 0:
-            (node_name, scope_name, node) = queue.pop(0)
-            find_fused_info = self._is_registered_conv(node)
-            if find_fused_info is not None:
-                find_fused_info.scope_conv = scope_name
-                if find_fused_info.root_model is None:
-                    find_fused_info.set_root_model(model)
-                    conv_m = find_fused_info.conv
-                    bn_m = find_fused_info.bn
-                    conv_have_bias = False if conv_m.bias is None else True
-                    clamp_conv = None
-                    device = QUANT_CONFIGS.device
-                    activation_type = getattr(conv_m, LINGER_ACTIVATION_TYPE, ActivationType.none)
-                    if type(conv_m) == torch.nn.Conv2d:
-                        clamp_conv = ConvBN2d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
-                                                       padding=conv_m.padding, dilation=conv_m.dilation, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
-                                                       eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
-                                                       constrain=None)
-                    elif type(conv_m) == torch.nn.Conv1d:
-                        clamp_conv = ConvBN1d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
-                                                       padding=conv_m.padding, dilation=conv_m.dilation, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
-                                                       eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
-                                                       constrain=None)
-                    elif type(conv_m) == torch.nn.ConvTranspose1d:
-                        clamp_conv = ConvTransposeBN1d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
-                                                       padding=conv_m.padding, output_padding=conv_m.output_padding, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
-                                                       eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
-                                                       constrain=None)
-                    elif type(conv_m) == torch.nn.ConvTranspose2d:
-                        clamp_conv = ConvTransposeBN2d(in_channels=conv_m.in_channels, out_channels=conv_m.out_channels, kernel_size=conv_m.kernel_size, stride=conv_m.stride,
-                                                       padding=conv_m.padding, output_padding=conv_m.output_padding, groups=conv_m.groups, bias=conv_have_bias, padding_mode=conv_m.padding_mode,
-                                                       eps=bn_m.eps, momentum=bn_m.momentum, affine=bn_m.affine, track_running_stats=bn_m.track_running_stats,
-                                                       constrain=None)
-                    setattr(clamp_conv, LINGER_ACTIVATION_TYPE, activation_type)
-                    clamp_conv = clamp_conv.to(device)
-                    setattr(find_fused_info.conv_f, node_name, clamp_conv)
-                else:
-                    assert find_fused_info.root_model == model
-            for name, submodule in node.named_children():
-                prefix = '' if scope_name == '' else scope_name+'.'
-                queue.append((name, prefix+name, submodule))
+    用法::
+        adapter = trace_layers_hook(model, dummy_input)
+        adapter.save('adapter.pth')
 
-    def build_empty_bn_scope(self, model):
-        queue = [('', '', model)]
-        while len(queue) > 0:
-            (node_name, scope_name, node) = queue.pop(0)
-            find_fused_info = self._is_registered_bn(node)
-            if find_fused_info is not None:
-                find_fused_info.scope_bn = scope_name
-                if find_fused_info.root_model is None:
-                    find_fused_info.set_root_model(model)
-                else:
-                    assert find_fused_info.root_model == model
-                setattr(find_fused_info.bn_f, node_name, EmptyBatchNorm())
-            for name, submodule in node.named_children():
-                prefix = '' if scope_name == '' else scope_name+'.'
-                queue.append((name, prefix+name, submodule))
+        # 之后在其他脚本中使用：
+        adapter = CheckpointAdapter.load('adapter.pth')
+        sd = torch.load('unfused_checkpoint.pth')
+        adapter.adapt(sd)
+        model.load_state_dict(sd)
+    """
+    def __init__(self, mappings=None):
+        self._mappings = mappings or []  # List[(conv_scope, bn_scope)]
 
-    @staticmethod
-    def get_module(model, scope):
-        attr_arr = scope.split('.')
-        cur_module = model
-        for att in attr_arr:
-            cur_module = getattr(cur_module, att, None)
-        return cur_module
+    def add(self, conv_scope, bn_scope):
+        self._mappings.append((conv_scope, bn_scope))
 
-    def fuse_state_dicts(self, state_dict):
-        for v in self.fused_conv_module.values():
-            assert v.scope_conv is not None
-            assert v.scope_bn is not None
+    def adapt(self, state_dict, prefix=''):
+        """将 unfused state_dict 原地转换为 fused 格式，返回同一 dict"""
+        for conv_scope, bn_scope in self._mappings:
+            _remap_keys(state_dict, prefix + conv_scope, prefix + bn_scope)
+        return state_dict
 
-            class GeneralModule():
-                pass
-            keys_bn = []
-            atts_bn = {}
-            for key_dict in state_dict.keys():
-                prefix = v.scope_bn+'.'
-                if key_dict.startswith(prefix):
-                    attr_name = key_dict[len(prefix):]
-                    attr_name = attr_name.split('.', 1)[0]
-                    keys_bn.append(key_dict)
-                    atts_bn[attr_name] = state_dict[key_dict]
-            keys_conv = []
-            atts_conv = {}
-            for key_dict in state_dict.keys():
-                prefix = v.scope_conv+'.'
-                if key_dict.startswith(prefix):
-                    attr_name = key_dict[len(prefix):]
-                    attr_name = attr_name.split('.', 1)[0]
-                    atts_conv[attr_name] = state_dict[key_dict]
-                    keys_conv.append(key_dict)
-            if LINGER_IGNORE_PAMAMTER not in atts_bn.keys():
-                for att, att_dict in atts_conv.items():
-                    state_dict[v.scope_conv+'.conv.'+att] = att_dict
-                for att, att_dict in atts_bn.items():
-                    state_dict[v.scope_conv+'.bn.'+att] = att_dict
-                for key_bn_pop in keys_bn:
-                    if key_bn_pop != LINGER_IGNORE_PAMAMTER:
-                        state_dict.pop(key_bn_pop)
-                for key_conv_pop in keys_conv:
-                    state_dict.pop(key_conv_pop)
+    def save(self, path):
+        torch.save({'mappings': self._mappings}, path)
 
-    def clear(self):
-        if self._is_close_register:
-            print("warning: module has initlized and linger.clear may not work")
-        self.fused_conv_module.clear()
-        self.fused_bn_module.clear()
+    @classmethod
+    def load(cls, path):
+        return cls(torch.load(path, weights_only=False)['mappings'])
 
-    def has_fuseable_items(self):
-        return len(self.fused_conv_module) > 0
+    def __repr__(self):
+        return f'CheckpointAdapter({len(self._mappings)} fusions)'
 
-class OpNodeInfo():
-    def __init__(self):
-        self.inputs = []
-        self.outputs = []
-        self.op = None
-        self.scope = None
 
-    def __str__(self):
-        s = 'input:'
-        for i in self.inputs:
-            s += i+' '
-        s += '\t output:'
-        for o in self.outputs:
-            s += o+' '
-        s += '\t operator:' + self.op
-        s += '\t scope:' + self.scope
-        return s
+def _remap_keys(sd, conv_scope, bn_scope):
+    """显式 key 重映射：unfused -> fused ConvBN 格式
 
-    @staticmethod
-    def parse_scope_to_path(scope_str):
-        tail_name = scope_str.strip().split('/')[-1].strip()
-        assert tail_name != ''
-        tail_name = tail_name.replace('__module.', '', 1)
-        return tail_name
+    conv_scope.weight -> conv_scope.conv.weight
+    bn_scope.weight   -> conv_scope.bn.weight
+    （其余 bias / running_mean / running_var / num_batches_tracked 同理）
+    """
+    # 已经是融合格式则跳过
+    if conv_scope + '.conv.weight' in sd:
+        return
+    if bn_scope + '.' + LINGER_IGNORE_PAMAMTER in sd:
+        return
+    # 重映射 conv 参数
+    for p in _CONV_PARAMS:
+        old = conv_scope + '.' + p
+        if old in sd:
+            sd[conv_scope + '.conv.' + p] = sd.pop(old)
+    # 重映射 bn 参数
+    for p in _BN_PARAMS:
+        old = bn_scope + '.' + p
+        if old in sd:
+            sd[conv_scope + '.bn.' + p] = sd.pop(old)
 
-    def parse_scope(self):
-        return self.parse_scope_to_path(self.scope)
 
-def get_op_nodes(graph):
-    nodes = []
-    for n in graph.nodes():
-        op_node = OpNodeInfo()
-        for i in n.inputs():
-            op_node.inputs.append(i.debugName())
-        for o in n.outputs():
-            op_node.outputs.append(o.debugName())
-        op_node.op = n.kind()
-        op_node.scope = n.scopeName()
-        nodes.append(op_node)
-    return nodes
+# ==================== 方案B: 自动加载 hook ====================
 
-def find_adjoin_layer(src_node_name, may_be_dst_layers, dict_input, dict_output, src_node_must_be_layers=None):
-    find_nodes = []
-    for dst_layer in may_be_dst_layers:
+def _register_load_hook(model, adapter):
+    """注册 state_dict 预加载 hook，加载时自动重映射 key"""
+    # 移除旧 hook
+    old = getattr(model, _LINGER_TRACE_HOOK_HANDLE, None)
+    if old is not None:
+        old.remove()
 
-        input_tensor = dst_layer.inputs[0]
-        src_node = dict_output[input_tensor]
-        if src_node != None and src_node.op == src_node_name:
-            input_node_set = dict_input[input_tensor]
-            if len(input_node_set) == 1 and dst_layer in input_node_set:
-                if src_node_must_be_layers is None:
-                    find_nodes.append((src_node, dst_layer))
-                elif src_node in src_node_must_be_layers:
-                    find_nodes.append((src_node, dst_layer))
-    target_set = set([])
-    src_set = set([])
-    for s, d in find_nodes:
-        src_set.add(s)
-        target_set.add(d)
-    return find_nodes, src_set, target_set
+    def pre_hook(state_dict, prefix, local_metadata, strict,
+                 missing_keys, unexpected_keys, error_msgs):
+        adapter.adapt(state_dict, prefix=prefix)
 
-def find_adjoin_adjoin_layer(src_node_name, mid_node_name, may_be_dst_layers, dict_input, dict_output):
-    find_nodes = []
-    for dst_layer in may_be_dst_layers:
-        dst_input_tensor = dst_layer.inputs[0]
-        mid_node = dict_output[dst_input_tensor]
-        if mid_node != None and mid_node.op == mid_node_name:
-            mid_input_node_set = dict_input[dst_input_tensor]
-            if len(mid_input_node_set) == 1 and dst_layer in mid_input_node_set:
-                mid_input_tensor = mid_node.inputs[0]
-                src_node = dict_output[mid_input_tensor]
-                if src_node != None and src_node.op == src_node_name:
-                    src_input_node_set = dict_input[mid_input_tensor]
-                    if len(src_input_node_set) == 1 and mid_node in src_input_node_set:
-                        find_nodes.append((src_node, mid_node, dst_layer))
-    src_set = set([])
-    mid_set = set([])
-    dst_set = set([])
-    for (s, m, d) in find_nodes:
-        src_set.add(s)
-        mid_set.add(m)
-        dst_set.add(d)
-    return find_nodes, src_set, mid_set, dst_set
+    handle = model._register_load_state_dict_pre_hook(pre_hook)
+    setattr(model, _LINGER_TRACE_HOOK_HANDLE, handle)
 
-def filter_layers(node_arr, op_name):
-    list_node = []
-    for n in node_arr:
-        # if n.op == op_name:
-        if op_name in n.op:
-            list_node.append(n)
-    return list_node
 
-def parse_fuseable_conv_bn(node_arr, fused_bn=True):
-    dict_output = {}
-    for n in node_arr:
-        for o in n.outputs:
-            dict_output[o] = n
-    dict_input = {}
-    for n in node_arr:
-        for i in n.inputs:
-            if dict_input.get(i) == None:
-                dict_input[i] = set([n])
-            else:
-                dict_input[i].add(n)
-    list_bn = filter_layers(node_arr, 'aten::batch_norm')
-    list_relu = filter_layers(node_arr, 'aten::relu')
-    list_sigmoid = filter_layers(node_arr, 'aten::sigmoid')
-    fused_conv_sigmoid = []
-    fused_linear_sigmoid = []
-    fused_linear_bias_sigmoid = []
-    fused_conv_bn = []
-    fused_conv_bn_relu = []
-    fused_conv_relu = []
-    fused_bn_relu = []
-    fused_linear_relu = []
-    fused_linear_bias_relu = []
-    if fused_bn:
-        fused_conv_bn, _, _ = find_adjoin_layer(
-            'aten::_convolution', list_bn, dict_input, dict_output)
-        # if ahead_bn_relu:
-        fused_conv_bn_relu, _, _, _ = find_adjoin_adjoin_layer(
-            'aten::_convolution', 'aten::batch_norm', list_relu, dict_input, dict_output)
-    # if ahead_conv_relu:
-    fused_conv_relu, _, _ = find_adjoin_layer(
-        'aten::_convolution', list_relu, dict_input, dict_output)
-    # if ahead_conv_sigmoid:
-    fused_conv_sigmoid, _, _ = find_adjoin_layer(
-        'aten::_convolution', list_sigmoid, dict_input, dict_output)
-    # if ahead_linear_sigmoid:
-    fused_linear_bias_sigmoid, _, _, _ = find_adjoin_adjoin_layer(
-        'aten::matmul', 'aten::add_', list_sigmoid, dict_input, dict_output)
-    fused_linear_sigmoid, _, _ = find_adjoin_layer(
-        'aten::matmul', list_sigmoid, dict_input, dict_output)
-    # if ahead_bn_relu:
-    fused_bn_relu, _, _ = find_adjoin_layer(
-        'aten::batch_norm', list_relu, dict_input, dict_output)
-    # if ahead_linear_relu:
-    fused_linear_bias_relu, _, _, _ = find_adjoin_adjoin_layer(
-        'aten::matmul', 'aten::add_', list_relu, dict_input, dict_output)
-    fused_linear_relu, _, _ = find_adjoin_layer(
-        'aten::matmul', list_relu, dict_input, dict_output)
+# ==================== 主入口 ====================
 
-    return fused_conv_bn, fused_conv_bn_relu, fused_conv_relu, fused_bn_relu, fused_linear_relu, fused_linear_bias_relu, fused_conv_sigmoid, fused_linear_sigmoid, fused_linear_bias_sigmoid
+def trace_layers(model, *args, fuse_bn=True):
+    r"""基于 Hook 的算子融合 tracer，替代 JIT-based trace_layers。
 
-def scope_to_module(root_module, scope):
-    tail_name = OpNodeInfo.parse_scope_to_path(scope)
-    module_arr_name = tail_name.split('.')
-    module_cur = root_module
-    module_cur_name = ''
-    moduel_cur_father = root_module
-    str_find = ''
-    for sub_att_name in module_arr_name:
-        str_find += sub_att_name+"."
-        moduel_cur_father = module_cur
-        module_cur = getattr(module_cur, sub_att_name)
-        module_cur_name = sub_att_name
-        assert module_cur is not None, 'can not find '+str_find
-    return (moduel_cur_father, module_cur, module_cur_name)
-
-def FuseConvBNAheadRelu(model, *args, fused_bn=True):
-    SingletonConvFusedBnModules().clear()
-    assert torch.__version__ >= '1.9.0', 'error: torch version must greater than 1.9'
-    graph = torch.jit.trace(model, *args)
-    node_arr = get_op_nodes(graph.inlined_graph)
-    fuseable_conv_bn, fuseable_conv_bn_relu, fuseable_conv_relu, fuseable_bn_relu, fuseable_linear_relu, fuseable_linear_bias_relu, fuseable_conv_sigmoid, fuseable_linear_sigmoid, fuseable_linear_bias_sigmoid = parse_fuseable_conv_bn(node_arr, fused_bn)
-    module_paths = []
-    if fused_bn:
-        for (conv, bn, _) in fuseable_conv_bn_relu:
-            _, conv_module, _ = scope_to_module(model, conv.scope)
-            setattr(conv_module, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
-        for (conv, bn) in fuseable_conv_bn:
-            conv_module_father, conv_module, conv_module_name = scope_to_module(model, conv.scope)
-            bn_module_father, bn_module, bn_module_name = scope_to_module(model, bn.scope)
-            if (type(conv_module) in (torch.nn.Conv2d, torch.nn.ConvTranspose2d) and type(bn_module) == torch.nn.BatchNorm2d) or \
-                    (type(conv_module) in (torch.nn.Conv1d, torch.nn.ConvTranspose1d) and type(bn_module) == torch.nn.BatchNorm1d):
-                fuseableconv_bn = FuseableConvBN(
-                    conv_module_father, conv_module, bn_module_father, bn_module)
-                SingletonConvFusedBnModules()._register(fuseableconv_bn)
-                module_paths.append((conv.parse_scope(), bn.parse_scope()))
-    for (conv, _) in fuseable_conv_relu:
-        _, conv_module, _ = scope_to_module(model, conv.scope)
-        setattr(conv_module, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
-    for (bn, _) in fuseable_bn_relu:
-        _, bn_module, _ = scope_to_module(model, bn.scope)
-        setattr(bn_module, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
-    for (conv, _) in fuseable_conv_sigmoid:
-        _, conv_module, _ = scope_to_module(model, conv.scope)
-        setattr(conv_module, LINGER_ACTIVATION_TYPE, ActivationType.Sigmoid)
-    for (linear, _) in fuseable_linear_sigmoid:
-        _, linear_module, _ = scope_to_module(model, linear.scope)
-        setattr(linear_module, LINGER_ACTIVATION_TYPE, ActivationType.Sigmoid)
-    for(linear, add, _) in fuseable_linear_bias_sigmoid:
-        _, linear_module, _ = scope_to_module(model, linear.scope)
-        setattr(linear_module, LINGER_ACTIVATION_TYPE, ActivationType.Sigmoid)
-    for(linear, _) in fuseable_linear_relu:
-        _, linear_module, _ = scope_to_module(model, linear.scope)
-        setattr(linear_module, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
-
-    for(linear, add, _) in fuseable_linear_bias_relu:
-        _, linear_module, _ = scope_to_module(model, linear.scope)
-        setattr(linear_module, LINGER_ACTIVATION_TYPE, ActivationType.Relu)
-    return module_paths
-
-def trace_layers(model: nn.Module, *args, fuse_bn: bool = True):
-    r"""对模型进行trace 同时进行模型提前进行fusion训练,root_model为原始的根module,target_model为目标trace的子model
+    与 trace_layers 的关键差异：
+      - 使用 forward hook 而非 torch.jit.trace，兼容动态控制流
+      - 三重校验（tensor id + _version + op计数）防止小算子误融合
+      - 权重加载同时支持 方案B（自动hook）和 方案C（CheckpointAdapter）
 
     Args:
-        model(torch.nn.Module): 原始根模型
-        args(torch.Tensor or Tuple or List): 模型Trace的位置参数
-        fuse_bn(bool)：是否融合BN 
-    returns:
-        返回融合BN后的module
+        model: 需要 trace 的模型或子模型
+        \*args: forward 所需的示例输入
+        fuse_bn: 是否执行 Conv-BN 融合
 
-    Examples:
-        test/test_trace_layers.py
+    Returns:
+        CheckpointAdapter: 可用于显式转换 unfused state_dict
 
-    Note:
-        trace_layer 只支持一次调用，对于多次调用时，会直接覆盖前一次trace_layer的实现，但并未体现在输出的net的网络结构中，内部hook会被清空，导致加载的融合参数无法生效
+    Examples::
+        # 方案B：自动加载（load_state_dict 时 hook 自动重映射）
+        adapter = trace_layers_hook(model, dummy_input)
+        model.load_state_dict(torch.load('unfused.pth'))
 
+        # 方案C：显式转换
+        adapter = trace_layers_hook(model, dummy_input)
+        sd = torch.load('unfused.pth')
+        adapter.adapt(sd)
+        model.load_state_dict(sd)
     """
-    if SingletonConvFusedBnModules().has_fuseable_items():
-        print("Warning: trace_layers only support one-time call, the latest call will overwrite the previous call and this may cause errors, please check !")
-    
-    _ = FuseConvBNAheadRelu(model, *args, fused_bn=fuse_bn)
-    if SingletonConvFusedBnModules().has_fuseable_items():
-        SingletonConvFusedBnModules().build_normalize_convbn2d_scope(model)
-        SingletonConvFusedBnModules().build_empty_bn_scope(model)
+    if getattr(model, _LINGER_TRACED, False):
+        print("Warning: trace_layers_hook 已在此模块上调用过，将替换之前的融合。")
 
-    def pre_hook(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
-        SingletonConvFusedBnModules().fuse_state_dicts(state_dict)
-        SingletonConvFusedBnModules().clear()
-    if SingletonConvFusedBnModules().has_fuseable_items():
-        model._register_load_state_dict_pre_hook(pre_hook)
+    # 清理旧的 activation type
+    for mod in model.modules():
+        if hasattr(mod, LINGER_ACTIVATION_TYPE):
+            delattr(mod, LINGER_ACTIVATION_TYPE)
 
-__all__ = ['trace_layers']
+    # 记录执行序列
+    records = _record_execution(model, *args)
+    adapter = CheckpointAdapter()
+
+    if len(records) >= 2:
+        gap = _calc_gap_threshold(records)
+        pairs = _analyze(records, gap, model, fuse_bn)
+        if pairs:
+            _apply_fusion(model, pairs)
+            for fb in pairs:
+                adapter.add(fb.scope_conv, fb.scope_bn)
+            # 方案B：注册自动加载 hook
+            _register_load_hook(model, adapter)
+
+    setattr(model, _LINGER_TRACED, True)
+    return adapter
+
+
+__all__ = ['trace_layers_hook', 'CheckpointAdapter',
+           'EmptyBatchNorm', 'FuseableConvBN']

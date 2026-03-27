@@ -124,7 +124,12 @@ def linearint(inputs, kwargs):
 @register_op(op_type=['QCat', 'iqCat'])
 def iqcat(inputs, kwargs):
     kwargs['is_cat'] = True
-    dim = kwargs.get('dim', -1)
+    if kwargs.get('dim', None) is not None:
+        dim = kwargs['dim']
+    elif kwargs.get('axis', None) is not None:
+        dim = kwargs['axis']
+    else:
+        dim = -1
     num_input = len(inputs)
 
     if inputs[0].dtype in {torch.int32, torch.int64}:
@@ -548,41 +553,38 @@ def softmaxInt(inputs,kwargs):
 #     s.requant_()
 #     return s
 
-@register_op(op_type='topN')
-def topn(inputs, kwargs):
-    input, idx_offset = inputs
-    assert isinstance(input, linger.QTensor) == True, 'input of topN must be QTensor'
-    dim = kwargs.get('dim', -1)
-    assert dim == -1 or dim == input.ndim-1, f'only the last dim is supported, the current value is {dim}'
-    max_num = kwargs.get('max_num', 1)
-    assert max_num == 1, f'only max_num=1 is supported, the current value is {max_num}'
-    assert input.shape[0] == 1, 'only input.shape[0] == 1 is supported.'
+# @register_op(op_type='topN')
+# def topn(inputs, kwargs):
+#     input, idx_offset = inputs
+#     assert isinstance(input, linger.QTensor) == True, 'input of topN must be QTensor'
+#     dim = kwargs.get('dim', -1)
+#     assert dim == -1 or dim == input.ndim-1, f'only the last dim is supported, the current value is {dim}'
+#     max_num = kwargs.get('max_num', 1)
+#     assert max_num == 1, f'only max_num=1 is supported, the current value is {max_num}'
+#     assert input.shape[0] == 1, 'only input.shape[0] == 1 is supported.'
 
-    scale = input.scale
-    zp = input.zero_point
-    data_bits = kwargs.get('data_bits', 8)
-    quant_mode = StringToQuantMode(kwargs.get('quant_mode', 'floor_add'))
+#     scale = input.scale
+#     data_bits = input.data_bits
+#     quant_mode = StringToQuantMode(kwargs.get('quant_mode', 'floor_add'))
     
-    q_input = (input * scale + 0.5).floor().to(torch.int32).clamp(-128, 127).cpu()
-    q_input, _ = quant(input, scale, zp, quant_mode)
-    val, idx = torch.topk(q_input, max_num, dim)
-    idx = idx.to(torch.int32) + idx_offset
-    res = torch.cat([val, idx], dim=0)
-    return res
+#     val, idx = torch.topk(input, max_num, dim)
+#     idx = idx.to(torch.int32) + idx_offset
+#     res = torch.cat([val, idx], dim=0)
+#     return res
 
-@register_op(op_type='topN2')
-def topn2(inputs, kwargs):
-    dim = kwargs.get('dim', -1)
-    assert dim == -1 or dim == input.ndim-1, f'only the last dim is supported, the current value is {dim}'
-    max_num = kwargs.get('max_num', 1)
-    assert max_num == 1, f'only max_num=1 is supported, the current value is {max_num}'
+# @register_op(op_type='topN2')
+# def topn2(inputs, kwargs):
+#     dim = kwargs.get('dim', -1)
+#     assert dim == -1 or dim == input.ndim-1, f'only the last dim is supported, the current value is {dim}'
+#     max_num = kwargs.get('max_num', 1)
+#     assert max_num == 1, f'only max_num=1 is supported, the current value is {max_num}'
 
-    input = inputs[0]
+#     input = inputs[0]
     
-    leading = torch.tensor(input.shape[:dim]).prod()
-    val, ori_idx = torch.tensor_split(input, 2, 0)
-    ori_idx = ori_idx.to(torch.long)
-    max_val, fake_idx = torch.topk(val, max_num, dim)
-    real_idx = torch.gather(ori_idx, dim=dim, index=fake_idx)
-    res = torch.cat([max_val, real_idx], dim=0)
-    return res
+#     leading = torch.tensor(input.shape[:dim]).prod()
+#     val, ori_idx = torch.tensor_split(input, 2, 0)
+#     ori_idx = ori_idx.to(torch.long)
+#     max_val, fake_idx = torch.topk(val, max_num, dim)
+#     real_idx = torch.gather(ori_idx, dim=dim, index=fake_idx)
+#     res = torch.cat([max_val, real_idx], dim=0)
+#     return res

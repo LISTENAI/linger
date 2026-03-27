@@ -82,9 +82,7 @@ class QGRUTanhFunction(torch.autograd.Function):
             i_q27.clamp_(-2**31, 2**31-1)
 
             output_q31 = None
-            if QUANT_CONFIGS.platform == PlatForm.venus:
-                output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
-            elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
+            if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
                 output_q31 = lingerext.arcs_qtanh_forward(i_q27.contiguous())
             elif QUANT_CONFIGS.platform == PlatForm.venusA:
                 output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
@@ -181,36 +179,80 @@ class QGRUOnnxFunction(torch.autograd.Function):
         return gru, hidden
 
 class QGRUCell(nn.Module):
-    def forward(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, training,
-                    input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                    biasih_quantizer, biashh_quantizer, output_quantizer):
-        # step1 input.mul, hidden.mul, fake_quant to keep same value
+    @staticmethod
+    def _ste_round_to_scale(x, scale_bits, round_mode=QuantMode.floor_add):
+        scale = float(2 ** scale_bits)
+        x_q = AQuantizer.quant_round(None, x.double() * scale, round_mode) / scale
+        return (x_q.to(dtype=x.dtype) - x).detach() + x
+
+    def _forward_venus(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                       input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                       biasih_quantizer, biashh_quantizer):
         gi_output = F.linear(input_x, weight_ih, bias_ih)
         gh_output = F.linear(hidden, weight_hh, bias_hh)
 
         scale_gi = input_quantizer.scale * weightih_quantizer.scale
         scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
-        gi_output = biasih_quantizer(gi_output, scale_gi) # fake_quant gi_output
+        gi_output = biasih_quantizer(gi_output, scale_gi)
         gh_output = biashh_quantizer(gh_output, scale_gh)
 
-        i_r, i_i, i_n = gi_output.chunk(3, 1)
-        h_r, h_i, h_n = gh_output.chunk(3, 1)
-        ih_r = i_r + h_r    #这一步推理时没有舍入
-        ih_i = i_i + h_i
-        resetgate = QGRUSigmoidFunction.apply(ih_r)
-        inputgate = QGRUSigmoidFunction.apply(ih_i)
+        i_r, i_z, i_n = gi_output.chunk(3, 1)
+        h_r, h_z, h_n = gh_output.chunk(3, 1)
+        resetgate = QGRUSigmoidFunction.apply(i_r + h_r)
+        updategate = QGRUSigmoidFunction.apply(i_z + h_z)
 
-        # 使用量化器中的quant_round保证梯度正常回传
-        h_n = biasih_quantizer.quant_round(h_n.double() * (2**27), QuantMode.floor_add) / (2 ** 27)  # 这一步需要舍入与推理保持一致
-        resetgate_h_n = resetgate.double() * h_n.double()   # Q15+Q27
-        resetgate_h_n = biasih_quantizer.quant_round(resetgate_h_n * (2**15), QuantMode.floor_add) / (2 ** 15)   # Q42->Q27 二次舍入处理
-        r_ih_n = resetgate_h_n + i_n
-        newgate = QGRUTanhFunction.apply(r_ih_n)
-        
-        new_hidden = biasih_quantizer.quant_round(hidden * (2**15), QuantMode.floor_add) / (2 ** 15)
-        hy = newgate + inputgate * (new_hidden - newgate)
+        h_n = self._ste_round_to_scale(h_n, 27, QuantMode.floor_add)
+        reset_hidden_n = self._ste_round_to_scale(resetgate.double() * h_n.double(), 15, QuantMode.floor_add)
+        newgate = QGRUTanhFunction.apply(i_n + reset_hidden_n)
 
+        hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
+        hy = newgate + updategate * (hidden_q - newgate)
         return hy
+
+    def _forward_venusa_arcs(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                             input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                             biasih_quantizer, biashh_quantizer):
+        hidden_size = hidden.size(1)
+        w_hh_rz, w_hh_n = weight_hh[:hidden_size * 2], weight_hh[hidden_size * 2:]
+        b_hh_rz = bias_hh[:hidden_size * 2] if bias_hh is not None else None
+        b_hh_n = bias_hh[hidden_size * 2:] if bias_hh is not None else None
+
+        gi_output = F.linear(input_x, weight_ih, bias_ih)
+        scale_gi = input_quantizer.scale * weightih_quantizer.scale
+        gi_output = biasih_quantizer(gi_output, scale_gi)
+        i_r, i_z, i_n = gi_output.chunk(3, 1)
+
+        gh_rz = F.linear(hidden, w_hh_rz, b_hh_rz)
+        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
+        gh_rz = biashh_quantizer(gh_rz, scale_gh)
+        h_r, h_z = gh_rz.chunk(2, 1)
+
+        resetgate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_r + h_r, 27, QuantMode.floor_add))
+        updategate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_z + h_z, 27, QuantMode.floor_add))
+
+        hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
+        reset_hidden = self._ste_round_to_scale(resetgate * hidden_q, 15, QuantMode.floor_add)
+
+        gh_n = F.linear(reset_hidden, w_hh_n, b_hh_n)
+        gh_n = biashh_quantizer(gh_n, scale_gh)
+        newgate = QGRUTanhFunction.apply(self._ste_round_to_scale(i_n + gh_n, 27, QuantMode.floor_add))
+        hy = newgate + updategate * (hidden_q - newgate)
+        return hy
+
+    def forward(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, training,
+                    input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
+                    biasih_quantizer, biashh_quantizer, output_quantizer):
+        if QUANT_CONFIGS.platform == PlatForm.venus:
+            return self._forward_venus(
+                input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                biasih_quantizer, biashh_quantizer,
+            )
+        return self._forward_venusa_arcs(
+            input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+            input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+            biasih_quantizer, biashh_quantizer,
+        )
         
 
 @register_qmodule(torch.nn.GRU)
@@ -495,7 +537,7 @@ class QGRU(QModuleMixin, nn.GRU):
 
         assert self.num_layers == 1, 'invalid num_layers, now only support num_layers = 1'
 
-        self.quantize_gru_input(input)
+        input = self.quantize_gru_input(input)
 
         # init hidden
         if hx is None:
@@ -620,7 +662,7 @@ class QGRU(QModuleMixin, nn.GRU):
                     #按batch的帧长排完序，由长到短，较短的帧hidden计算的次数少，直接取低位保留
                     final_hiddens.append(_slice(hidden, batch_len, last_batch_size))
                     hidden = hx_slice(None, hidden, last_batch_size, batch_len)
-                hidden = self.qgru_cell_func(input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
+                hidden = self.qgru_cell_func(input_i, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
                                         biasih_quantizer, biashh_quantizer, output_quantizer)
                 hidden = self.quantize_gru_hidden(hidden, direct)
@@ -647,7 +689,7 @@ class QGRU(QModuleMixin, nn.GRU):
                 if last_batch_size != batch_len:
                     #获取input_hx高位hidden部分与上一帧的hidden进行填充，相当于补0
                     hidden = hx_slice(input_hx, hidden, last_batch_size, batch_len)           
-                hidden = self.qgru_cell_func(input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
+                hidden = self.qgru_cell_func(input_i, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
                                         biasih_quantizer, biashh_quantizer, output_quantizer)
                 hidden = self.quantize_gru_hidden(hidden, direct)
@@ -658,7 +700,7 @@ class QGRU(QModuleMixin, nn.GRU):
             step_outputs = step_outputs[::-1]
             output = torch.cat(step_outputs, 0)
 
-        hidden = self.quantize_gru_hidden(output, direct)  # keep scale_h equal scale_o
+        hidden = self.quantize_gru_hidden(hidden, direct)
         output = self.quantize_gru_out(output, direct)
         return output, hidden
     
@@ -680,4 +722,3 @@ class QGRU(QModuleMixin, nn.GRU):
         else:
             hiddens = None
         return hiddens
-

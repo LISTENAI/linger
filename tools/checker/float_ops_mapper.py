@@ -239,7 +239,7 @@ def averagepool(inputs, kwargs):
     pads = tuple(kwargs.get("pads",[0,0,0,0]))[:2] # argument 'padding' must be tuple of ints, not str
     return F.avg_pool2d(inputs[0],kernel_size = kernel_shape,stride = strides,padding = pads,ceil_mode = ceil_mode)
 
-@register_op(op_type="Pad")
+@register_op(op_type=["Pad", "iqPad"])
 def pad(inputs, kwargs):
     # the pads inputs in onnx is 'x1_begin,x2_begin ...,x1_end,x2_end...'
     # the pads used in F.pad is 'x4_start,x4_end....x1_start,x1_end'

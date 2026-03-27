@@ -72,7 +72,7 @@ dynamic_axes = {'input_1':{0:'batch',
                              2:'height'},
                   'input_2':{0:'batch'},
                   'output':{0:'batch',
-                            1:'detections'}
+                            1:'detections'}}
 ```
 - 将上面两者进行混用
 ``` python

@@ -194,6 +194,8 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict['pads_i'] = tuple_fn(cls.padding) * 2
         qparam_dict['strides_i'] = tuple_fn(cls.stride)
         qparam_dict['ceil_mode_i'] = cls.ceil_mode
+        qparam_dict['count_include_pad_i'] = int(cls.count_include_pad)
+        qparam_dict['divisor_override_i'] = -1 if cls.divisor_override is None else int(cls.divisor_override)
     elif 'GRU' in qparam_dict['op_type'] or 'LSTM' in qparam_dict['op_type']:
         qparam_dict['input_size_i'] = int(cls.input_size)
         qparam_dict['hidden_size_i'] = int(cls.hidden_size)

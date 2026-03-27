@@ -85,7 +85,7 @@ def quant_module(module: nn.Module, c_activation_val: float = 8.0, c_weight_val:
             m.output_quantizer.data_bits = out_bits
             m.output_quantizer.clamp_activation_value = c_activation_val
 
-def constrain(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
+def constrain(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=[]):
     c_configs = QUANT_CONFIGS
     if config_file is not None:
         c_configs._load_from_yaml(config_file)
@@ -96,14 +96,14 @@ def constrain(model: nn.Module, config_file: str = None, disable_module=None, di
                 _CMODULE_TABLE.pop(name)
 
     for name, m in model.named_modules():
-        if disable_submodel is not None and any(fnmatch(name, pattern) for pattern in disable_submodel):
+        if any(name.startswith(p) for p in disable_submodel): # disable_submodel 直接按照module的名称进行屏蔽
             continue
         _constrain_submodule(model, name, m, c_configs.clamp_info.to_dict())
 
     model.to(c_configs.device)
     return model
 
-def init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
+def init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=[]):
 
     q_configs = QUANT_CONFIGS
     if config_file is not None:
@@ -117,11 +117,8 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
     # traced_model = symbolic_trace(model)
     # model = _replace_ops(traced_model, q_configs)
 
-    has_replaced = []
     for name, m in model.named_modules():
-        if disable_submodel is not None and any(fnmatch(name, pattern) for pattern in disable_submodel):
-            continue
-        if any(name.startswith(p + ".") for p in has_replaced):
+        if any(name.startswith(p) for p in disable_submodel): # disable_submodel 直接按照module的名称进行量化屏蔽
             continue
         
         m.register_forward_pre_hook(hook_pre_forward)
@@ -129,9 +126,23 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
 
         is_replaced = _quantize_submodule(model, name, m, weights_cfg=q_configs.quant_info.to_dict(), activations_cfg=q_configs.quant_info.to_dict(), bias_cfg=q_configs.quant_info.to_dict(), constrain =  q_configs.clamp_info.to_dict())
         if is_replaced:
-            has_replaced.append(name)
+            disable_submodel.append(name)
 
     def quant_tensor_pre_hook(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        quantizer_tags = (
+            ".input_quantizer.",
+            ".output_quantizer.",
+            ".weight_quantizer.",
+            ".bias_quantizer.",
+        )
+
+        # 兼容量化初始化后的模型加载浮点checkpoint:
+        # 若checkpoint中没有量化器自身的buffer/parameter，则用当前量化模型的默认值补齐，
+        # 这样 strict=True 仍然只对真实业务权重保持严格校验。
+        model_state = model.state_dict()
+        for key, value in model_state.items():
+            if key.startswith(prefix) and any(tag in key for tag in quantizer_tags) and key not in state_dict:
+                state_dict[key] = value
     
         def quant_tensor_layer(module, prefix=''):
             local_name_params = itertools.chain(
