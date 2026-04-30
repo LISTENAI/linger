@@ -3,6 +3,7 @@ import torch
 from linger.quant.ops import *
 from .utils import get_param,register_op
 from linger.config import QUANT_CONFIGS
+from linger.utils import PlatForm
 import numpy as np
 import linger
 from linger.utils import quant, dequant
@@ -422,8 +423,12 @@ def batchnorm2dInt(inputs, kwargs):
 @register_op(op_type=["GRUInt", "QGRU"])
 def gruint(inputs, kwargs):
     inputs_len = len(inputs)
-    assert inputs_len == 5, f'GRUInt/QGRU input numbuder {inputs_len} is invalid.'
-    input, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+    assert inputs_len in (5, 6), f'GRUInt/QGRU input numbuder {inputs_len} is invalid.'
+    h0 = None
+    if inputs_len == 5:
+        input, weight_ih, weight_hh, bias_ih, bias_hh = inputs
+    else:
+        input, h0, weight_ih, weight_hh, bias_ih, bias_hh = inputs
     
     device = input.device
     batch_first = kwargs.get('batch_first', 1)
@@ -436,14 +441,22 @@ def gruint(inputs, kwargs):
     
     instance = create_rnn_module(QGRU, module, device, kwargs)
     instance = load_rnn_quantized_weights(instance, kwargs, weight_ih, weight_hh, bias_ih, bias_hh)
+    instance.eval()
 
-    if kwargs['go_forward'] == 1:  
-        return instance(input)
-    else:
-        reversed_input = torch.flip(input, dims=[1])
-        out = instance(reversed_input)
-        out_0 = torch.flip(out[0], dims=[1])
-        return tuple([out_0, out[1]])
+    original_platform = QUANT_CONFIGS.platform
+    runtime_platform = original_platform
+
+    try:
+        QUANT_CONFIGS.platform = runtime_platform
+        if kwargs['go_forward'] == 1:  
+            return instance(input, h0)
+        else:
+            reversed_input = torch.flip(input, dims=[1])
+            out = instance(reversed_input, h0)
+            out_0 = torch.flip(out[0], dims=[1])
+            return tuple([out_0, out[1]])
+    finally:
+        QUANT_CONFIGS.platform = original_platform
     
 
 @register_op(op_type=['QLSTM', "LSTMInt"])
@@ -514,6 +527,22 @@ def iqtanh(inputs, kwargs):
     kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QTanh, None, 1, kwargs)
+    return instance(input)
+
+@register_op(op_type=['QGelu'])
+def iqgelu(inputs, kwargs):
+    input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
+
+    instance = create_qmodule_tensor(QGelu, None, 1, kwargs)
+    return instance(input)
+
+@register_op(op_type=['QSwish'])
+def iqswish(inputs, kwargs):
+    input = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
+
+    instance = create_qmodule_tensor(QSwish, None, 1, kwargs)
     return instance(input)
 
 @register_op(op_type=['QSoftmax', 'SoftmaxInt'])

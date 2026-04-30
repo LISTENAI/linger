@@ -85,10 +85,11 @@ def quant_module(module: nn.Module, c_activation_val: float = 8.0, c_weight_val:
             m.output_quantizer.data_bits = out_bits
             m.output_quantizer.clamp_activation_value = c_activation_val
 
-def constrain(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=[]):
+def constrain(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
     c_configs = QUANT_CONFIGS
     if config_file is not None:
         c_configs._load_from_yaml(config_file)
+    disabled_submodels = [] if disable_submodel is None else list(disable_submodel)
 
     if disable_module is not None:
         for name in disable_module:
@@ -96,18 +97,19 @@ def constrain(model: nn.Module, config_file: str = None, disable_module=None, di
                 _CMODULE_TABLE.pop(name)
 
     for name, m in model.named_modules():
-        if any(name.startswith(p) for p in disable_submodel): # disable_submodel 直接按照module的名称进行屏蔽
+        if any(name.startswith(p) for p in disabled_submodels): # disable_submodel 直接按照module的名称进行屏蔽
             continue
         _constrain_submodule(model, name, m, c_configs.clamp_info.to_dict())
 
     model.to(c_configs.device)
     return model
 
-def init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=[]):
+def init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
 
     q_configs = QUANT_CONFIGS
     if config_file is not None:
         q_configs._load_from_yaml(config_file)
+    disabled_submodels = [] if disable_submodel is None else list(disable_submodel)
     
     if disable_module is not None:
         for name in disable_module:
@@ -118,7 +120,7 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
     # model = _replace_ops(traced_model, q_configs)
 
     for name, m in model.named_modules():
-        if any(name.startswith(p) for p in disable_submodel): # disable_submodel 直接按照module的名称进行量化屏蔽
+        if any(name.startswith(p) for p in disabled_submodels): # disable_submodel 直接按照module的名称进行量化屏蔽
             continue
         
         m.register_forward_pre_hook(hook_pre_forward)
@@ -126,7 +128,7 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
 
         is_replaced = _quantize_submodule(model, name, m, weights_cfg=q_configs.quant_info.to_dict(), activations_cfg=q_configs.quant_info.to_dict(), bias_cfg=q_configs.quant_info.to_dict(), constrain =  q_configs.clamp_info.to_dict())
         if is_replaced:
-            disable_submodel.append(name)
+            disabled_submodels.append(name)
 
     def quant_tensor_pre_hook(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         quantizer_tags = (
@@ -191,6 +193,14 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
                                 iq_layer = QTanh(activate_config=activate_cfg, num_input=1)
                                 iq_layer.training = model.training
                                 # iq_layer = iq_layer.to(device)
+                                setattr(module, input_name, iq_layer)
+                            elif '_qgelu_' in input_name:
+                                iq_layer = QGelu(activate_config=activate_cfg, num_input=1)
+                                iq_layer.training = model.training
+                                setattr(module, input_name, iq_layer)
+                            elif '_qswish_' in input_name:
+                                iq_layer = QSwish(activate_config=activate_cfg, num_input=1)
+                                iq_layer.training = model.training
                                 setattr(module, input_name, iq_layer)
                             elif '_qsoftmax_' in input_name:
                                 iq_layer = QSoftmax(activate_config=activate_cfg, num_input=1)

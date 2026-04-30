@@ -21,7 +21,7 @@ static int32_t shift_pure(int64_t v, int32_t s)
 	} else {
         v = v >> (-s);
     }
-    return SATURATE(v, 32);
+    return v;
 }
 
 static int32_t sub32s(int32_t a, int32_t b)
@@ -150,7 +150,7 @@ torch::Tensor venusa_qsoftmax_cpu(const torch::Tensor& in, int64_t dim)
 		for (int i = 0; i < N; i++)
 		{
 			data = sub32s(x_ptr[i], max_value);
-            X = shfit_floor_x05_int64((int64_t)X * (int64_t)774541002, 31);
+            X = shfit_floor_x05_int64((int64_t)data * (int64_t)774541002, 31);
 			// X = shift_rasyms((int64_t)data * (int64_t)774541002, -31);//exp=>2xp，Q6.25=>Q8.23
 			E = X >> 23;
 			E = E + 1;//与118行对应
@@ -201,4 +201,3 @@ torch::Tensor venusa_qsoftmax_cpu(const torch::Tensor& in, int64_t dim)
 
 	return out;
 }
-

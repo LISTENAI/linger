@@ -11,6 +11,21 @@
   ((x) > MAX_BITS(bits) ? MAX_BITS(bits) \
                         : ((x) < MIN_BITS(bits) ? MIN_BITS(bits) : (x)))
 
+static int64_t shfit_floor_x05_int64(int64_t x, int32_t shift)
+{
+	int64_t val = x;
+
+	if (shift >= 64) {
+		return 0;
+	}
+	if (shift > 0) {
+		val = val >> (shift - 1);
+		val = (val & 0x1) + (val >> 1);
+	}
+
+	return val;
+}
+
 torch::Tensor venusa_qtanh_cpu(torch::Tensor a)
 {
 	int32_t N = a.numel();
@@ -28,7 +43,6 @@ torch::Tensor venusa_qtanh_cpu(torch::Tensor a)
 	int64_t absx = 0;
 	int64_t slope = 0;
 	int64_t bias = 0;
-	int32_t shift = 0;
 	int64_t tmp = 0;
 	int64_t out = 0;
 
@@ -68,16 +82,15 @@ torch::Tensor venusa_qtanh_cpu(torch::Tensor a)
 				bias = 0;
 			}
 		}
-
-        bias = bias << 3;
 		if (1 == sign)
 		{
-			out = ((-1 * slope * absx) >> 27) - bias;
+			out = (-slope * absx) - (bias << 30);
 		}
 		else
 		{
-			out = ((slope * absx) >> 27) + bias;
+			out = (slope * absx) + (bias << 30);
 		}
+		out = shfit_floor_x05_int64(out, 27);
 
 		c_ptr[i] = SATURATE(out, 32);
 	}

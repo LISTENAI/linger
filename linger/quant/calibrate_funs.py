@@ -31,7 +31,7 @@ def abs_max_init(self, tensor, *args):
         self.learning_data.fill_(tensor.abs().max().clamp(min=1e-6).log2())
         learning_data = self.data_bits - 1 - self.learning_data.squeeze(0)
         learning_data = self.quant_round(learning_data, self.round_mode)
-        scale = 2**learning_data
+        scale = torch.exp2(learning_data)
         # self.scale = scale.clamp(min=1e-6, max=2**24)
         self.is_calibrate.fill_(True)
 
@@ -46,7 +46,7 @@ def top_10_init(self, tensor, *args):
             self.learning_data.fill_(tensor.abs().max().clamp(min=1e-6).log2())
         learning_data = self.data_bits - 1 - self.learning_data.squeeze(0)
         learning_data = self.quant_round(learning_data, self.round_mode)
-        scale = 2**learning_data
+        scale = torch.exp2(learning_data)
         # self.scale.fill_(scale.clamp(min=1e-6, max=2**24))
         self.is_calibrate.fill_(True)
 
@@ -80,7 +80,7 @@ def w_like_init(self, tensor, *args):
         self.learning_data.fill_(get_best_pow2coef_W(tensor, args[0]))
         learning_data = self.data_bits - 1 - self.learning_data.squeeze(0)
         learning_data = self.quant_round(learning_data, self.round_mode)
-        scale = 2**learning_data
+        scale = torch.exp2(learning_data)
         self.scale = scale.clamp(min=1e-6, max=2**24)
         self.is_calibrate.fill_(True)
 

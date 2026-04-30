@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from .qavgpool_chip import simulate_avgpool2d
 from ..qconfig import register_qmodule
+from ...quantizer import AQuantizer
+from ...qtensor import from_tensor_to_qtensor
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from ....utils import QuantMode
 from typing import Optional, Dict, Any
@@ -43,7 +45,7 @@ class QAvgPool2d(QModuleMixin, nn.AvgPool2d):
         constrain: Optional[Dict[str, Any]] = None,
         device: Optional[Dict[str, Any]] = None,
     ):
-        return cls(
+        qmodule = cls(
             kernel_size = module.kernel_size,
             stride = module.stride,
             padding = module.padding,
@@ -57,8 +59,10 @@ class QAvgPool2d(QModuleMixin, nn.AvgPool2d):
             constrain=None, 
             bias_cfg=None,
             open_ihook = True,
-            open_ohook = True,
+            open_ohook = False,
         )
+        qmodule.add_module("output_quantizer", AQuantizer(activations_cfg, constrain))
+        return qmodule
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if torch.onnx.is_in_onnx_export():
@@ -73,23 +77,30 @@ class QAvgPool2d(QModuleMixin, nn.AvgPool2d):
             self.count_include_pad,
             self.divisor_override,
         )
+        ref_out = self.output_quantizer(ref_out)
         input_scale = 1.0
-        round_mode = QuantMode.floor_add
+        input_round_mode = QuantMode.floor_add
         if hasattr(self, "input_quantizer"):
             input_scale = float(self.input_quantizer.scale)
-            round_mode = self.input_quantizer.round_mode
+            input_round_mode = self.input_quantizer.round_mode
+        output_scale = float(self.output_quantizer.scale)
+        output_round_mode = self.output_quantizer.round_mode
         aligned_out = simulate_avgpool2d(
             input,
-            scale=input_scale,
+            input_scale=input_scale,
+            output_scale=output_scale,
             kernel_size=self.kernel_size,
             stride=self.stride,
             padding=self.padding,
             ceil_mode=self.ceil_mode,
             count_include_pad=self.count_include_pad,
             divisor_override=self.divisor_override,
-            round_mode=round_mode,
+            input_round_mode=input_round_mode,
+            output_round_mode=output_round_mode,
+            output_quant_min=self.output_quantizer.quant_min,
+            output_quant_max=self.output_quantizer.quant_max,
         )
         if self.training:
-            return ref_out + (aligned_out - ref_out).detach()
-        return aligned_out
+            aligned_out = ref_out + (aligned_out - ref_out).detach()
+        return from_tensor_to_qtensor(aligned_out, self.output_quantizer.scale, self.output_quantizer.data_bits)
         

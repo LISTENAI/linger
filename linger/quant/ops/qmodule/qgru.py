@@ -28,6 +28,16 @@ def luna_requant(x_int, scale_x, scale_y):
         x_int = (x_int * pow(2, l_scale) + 0.5).floor().int()
     return x_int
 
+
+def _round_clamp_to_int(input, scale_bits, min_val, max_val):
+    return (input * (1 << scale_bits) + 0.5).floor().to(torch.int64).clamp_(min_val, max_val).to(torch.int32)
+
+
+def _select_direction_state(g, state, direction):
+    index = torch.tensor([direction], dtype=torch.long)
+    index_node = g.op("Constant", value_t=index)
+    return g.op("Gather", state, index_node, axis_i=0)
+
 class QGRUSigmoidFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
@@ -35,13 +45,11 @@ class QGRUSigmoidFunction(torch.autograd.Function):
 
         if QUANT_CONFIGS.platform == PlatForm.venus:
             # 转换为Q11格式的int32
-            i_q11 = (input * (1 << 11) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q11.clamp_(-2**15, 2**15-1)
+            i_q11 = _round_clamp_to_int(input, 11, -2**15, 2**15-1)   # float到int32需要2次舍入，这是第二次
             output_q15 = lingerext.venus_qsigmoid_forward(i_q11.contiguous())
         else:
             # 转换为Q27格式的int32
-            i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q27.clamp_(-2**31, 2**31-1)
+            i_q27 = _round_clamp_to_int(input, 27, -2**31, 2**31-1)   # float到int32需要2次舍入，这是第二次
 
             output_q31 = None
             if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
@@ -73,13 +81,11 @@ class QGRUTanhFunction(torch.autograd.Function):
 
         if QUANT_CONFIGS.platform == PlatForm.venus:
             # 转换为Q11格式的int32
-            i_q11 = (input * (1 << 11) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q11.clamp_(-2**15, 2**15-1)
+            i_q11 = _round_clamp_to_int(input, 11, -2**15, 2**15-1)   # float到int32需要2次舍入，这是第二次
             output_q15 = lingerext.venus_qtanh_forward(i_q11.contiguous())
         else:
             # 转换为Q27格式的int32
-            i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q27.clamp_(-2**31, 2**31-1)
+            i_q27 = _round_clamp_to_int(input, 27, -2**31, 2**31-1)   # float到int32需要2次舍入，这是第二次
 
             output_q31 = None
             if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
@@ -132,6 +138,7 @@ class QGRUOnnxFunction(torch.autograd.Function):
 
         op_type = qparam_dict.get("op_type", "QGeneric")
         is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        has_hidden = bool(qparam_dict.get("has_hidden_i", 0))
         node_name = f"{QDOMAIN_NAME}::{op_type}"
         qparam_dict.pop('op_type', None)
         qparam_dict.pop('is_input_qtensor', None)
@@ -144,6 +151,9 @@ class QGRUOnnxFunction(torch.autograd.Function):
             input_list = [op_inner, weight_ih, weight_hh]
         else:
             input_list = [input, weight_ih, weight_hh]
+        if has_hidden:
+            hidden_state_f = hidden_state if qparam_dict_r is None else _select_direction_state(g, hidden_state, 0)
+            input_list.insert(1, hidden_state_f)
         if bias_ih is not None:
             input_list.append(bias_ih)
             input_list.append(bias_hh)
@@ -155,6 +165,8 @@ class QGRUOnnxFunction(torch.autograd.Function):
                 input_list_r = [op_inner, weight_ih_reverse, weight_hh_reverse]
             else:
                 input_list_r = [input, weight_ih_reverse, weight_hh_reverse]
+            if has_hidden:
+                input_list_r.insert(1, _select_direction_state(g, hidden_state, 1))
             if bias_ih_reverse is not None:
                 input_list_r.append(bias_ih_reverse)
                 input_list_r.append(bias_hh_reverse)
@@ -179,11 +191,60 @@ class QGRUOnnxFunction(torch.autograd.Function):
         return gru, hidden
 
 class QGRUCell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # None means auto: use the STE-friendly path in training and the exact
+        # runtime-matching path in eval/inference. Bool values remain as an
+        # explicit override for checker/debug scenarios.
+        self.exact_runtime_match = None
+
+    def _should_use_exact_runtime_match(self, training):
+        if self.exact_runtime_match is None:
+            return not training
+        return bool(self.exact_runtime_match)
+
     @staticmethod
     def _ste_round_to_scale(x, scale_bits, round_mode=QuantMode.floor_add):
         scale = float(2 ** scale_bits)
         x_q = AQuantizer.quant_round(None, x.double() * scale, round_mode) / scale
         return (x_q.to(dtype=x.dtype) - x).detach() + x
+
+    @staticmethod
+    def _scale_to_bits(scale):
+        scale_value = float(scale)
+        scale_bits = math.log2(scale_value)
+        assert abs(scale_bits - round(scale_bits)) < 1e-6, f"scale {scale_value} is not power-of-two"
+        return int(round(scale_bits))
+
+    @staticmethod
+    def _round_to_int_tensor(x, scale_bits, round_mode=QuantMode.floor_add):
+        scale = float(2 ** scale_bits)
+        return AQuantizer.quant_round(None, x.double() * scale, round_mode).to(torch.int64)
+
+    @staticmethod
+    def _matmul_int_with_bias(x_int, w_int, b_int):
+        out = torch.matmul(x_int.double(), w_int.t().double()).round().to(torch.int64)
+        return out + b_int.to(torch.int64)
+
+    @staticmethod
+    def _requant_int_tensor(x_int, src_bits, dst_bits):
+        if dst_bits >= src_bits:
+            return x_int << (dst_bits - src_bits)
+        shift = src_bits - dst_bits
+        return (x_int.double() * (2.0 ** (-shift)) + 0.5).floor().to(torch.int64)
+
+    @staticmethod
+    def _clamp_to_int32_tensor(x_int):
+        return x_int.clamp_(min=-(2**31), max=2**31 - 1).to(torch.int32)
+
+    @staticmethod
+    def _venusa_activation_q31(input_fp, kind):
+        q27 = _round_clamp_to_int(input_fp, 27, -2**31, 2**31 - 1)
+        if kind == "sigmoid":
+            return lingerext.venusa_qsigmoid_forward(q27.contiguous()).to(torch.int64)
+        if kind == "tanh":
+            return lingerext.venusa_qtanh_forward(q27.contiguous()).to(torch.int64)
+        raise ValueError(f"unsupported activation kind: {kind}")
 
     def _forward_venus(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
@@ -209,9 +270,80 @@ class QGRUCell(nn.Module):
         hy = newgate + updategate * (hidden_q - newgate)
         return hy
 
-    def _forward_venusa_arcs(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
-                             input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-                             biasih_quantizer, biashh_quantizer):
+    def _forward_venusa(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                        biasih_quantizer, biashh_quantizer, training):
+        gi_output = F.linear(input_x, weight_ih, bias_ih)
+        gh_output = F.linear(hidden, weight_hh, bias_hh)
+
+        scale_gi = input_quantizer.scale * weightih_quantizer.scale
+        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
+        gi_output = biasih_quantizer(gi_output, scale_gi)
+        gh_output = biashh_quantizer(gh_output, scale_gh)
+
+        q_ib = self._scale_to_bits(scale_gi)
+        q_hb = self._scale_to_bits(scale_gh)
+        max_b_q = max(q_ib, q_hb)
+        q_h = self._scale_to_bits(hidden_quantizer.scale)
+
+        i_r, i_z, i_n = gi_output.chunk(3, 1)
+        h_r, h_z, h_n = gh_output.chunk(3, 1)
+        if not self._should_use_exact_runtime_match(training):
+            resetgate = QGRUSigmoidFunction.apply(i_r + h_r)
+            updategate = QGRUSigmoidFunction.apply(i_z + h_z)
+
+            h_n = self._ste_round_to_scale(h_n, 27, QuantMode.floor_add)
+            reset_hidden_n = self._ste_round_to_scale(resetgate.double() * h_n.double(), 15, QuantMode.floor_add)
+            newgate = QGRUTanhFunction.apply(i_n + reset_hidden_n)
+
+            hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
+            hy = newgate + updategate * (hidden_q - newgate)
+            return hy
+
+        q_i = self._scale_to_bits(input_quantizer.scale)
+        q_iw = self._scale_to_bits(weightih_quantizer.scale)
+        q_hw = self._scale_to_bits(weighthh_quantizer.scale)
+
+        x_int = self._round_to_int_tensor(input_x, q_i)
+        hidden_int = self._round_to_int_tensor(hidden, q_h)
+        w_ih_int = self._round_to_int_tensor(weight_ih, q_iw)
+        w_hh_int = self._round_to_int_tensor(weight_hh, q_hw)
+        b_ih_int = self._round_to_int_tensor(bias_ih, q_ib)
+        b_hh_int = self._round_to_int_tensor(bias_hh, q_hb)
+
+        gi_int = self._matmul_int_with_bias(x_int, w_ih_int, b_ih_int)
+        gh_int = self._matmul_int_with_bias(hidden_int, w_hh_int, b_hh_int)
+        if q_ib < max_b_q:
+            gi_int = gi_int << (max_b_q - q_ib)
+        elif q_ib > max_b_q:
+            gi_int = self._requant_int_tensor(gi_int, q_ib, max_b_q)
+        if q_hb < max_b_q:
+            gh_int = gh_int << (max_b_q - q_hb)
+        elif q_hb > max_b_q:
+            gh_int = self._requant_int_tensor(gh_int, q_hb, max_b_q)
+
+        i_r_int, i_z_int, i_n_int = gi_int.chunk(3, 1)
+        h_r_int, h_z_int, h_n_int = gh_int.chunk(3, 1)
+        reset_pre_int = self._requant_int_tensor(i_r_int + h_r_int, max_b_q, 27)
+        update_pre_int = self._requant_int_tensor(i_z_int + h_z_int, max_b_q, 27)
+        reset_pre_i32 = self._clamp_to_int32_tensor(reset_pre_int)
+        update_pre_i32 = self._clamp_to_int32_tensor(update_pre_int)
+        resetgate_q31 = lingerext.venusa_qsigmoid_forward(reset_pre_i32.contiguous()).to(torch.int64)
+        updategate_q31 = lingerext.venusa_qsigmoid_forward(update_pre_i32.contiguous()).to(torch.int64)
+
+        reset_hidden_n_int = self._requant_int_tensor(resetgate_q31 * h_n_int, 31 + max_b_q, max_b_q)
+        newgate_pre_int = self._requant_int_tensor(i_n_int + reset_hidden_n_int, max_b_q, 27)
+        newgate_pre_i32 = self._clamp_to_int32_tensor(newgate_pre_int)
+        newgate_q31 = lingerext.venusa_qtanh_forward(newgate_pre_i32.contiguous()).to(torch.int64)
+        newgate_qh_int = self._requant_int_tensor(newgate_q31, 31, q_h)
+
+        update_hidden_int = self._requant_int_tensor(updategate_q31 * (hidden_int - newgate_qh_int), 31 + q_h, q_h)
+        hy_int = newgate_qh_int + update_hidden_int
+        return hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
+
+    def _forward_arcs_mars(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                           input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                           biasih_quantizer, biashh_quantizer, training):
         hidden_size = hidden.size(1)
         w_hh_rz, w_hh_n = weight_hh[:hidden_size * 2], weight_hh[hidden_size * 2:]
         b_hh_rz = bias_hh[:hidden_size * 2] if bias_hh is not None else None
@@ -227,16 +359,38 @@ class QGRUCell(nn.Module):
         gh_rz = biashh_quantizer(gh_rz, scale_gh)
         h_r, h_z = gh_rz.chunk(2, 1)
 
+        q_h = self._scale_to_bits(hidden_quantizer.scale)
+        if not self._should_use_exact_runtime_match(training):
+            resetgate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_r + h_r, 27, QuantMode.floor_add))
+            updategate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_z + h_z, 27, QuantMode.floor_add))
+
+            hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
+            reset_hidden = self._ste_round_to_scale(resetgate * hidden_q, 7, QuantMode.floor_add)
+
+            gh_n = F.linear(reset_hidden, w_hh_n, b_hh_n)
+            gh_n = biashh_quantizer(gh_n, scale_gh)
+            newgate = QGRUTanhFunction.apply(self._ste_round_to_scale(i_n + gh_n, 27, QuantMode.floor_add))
+            hy = newgate + updategate * (hidden_q - newgate)
+            return hy
+
+        i_r = self._ste_round_to_scale(i_r, 27, QuantMode.floor_add)
+        i_z = self._ste_round_to_scale(i_z, 27, QuantMode.floor_add)
+        h_r = self._ste_round_to_scale(h_r, 27, QuantMode.floor_add)
+        h_z = self._ste_round_to_scale(h_z, 27, QuantMode.floor_add)
         resetgate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_r + h_r, 27, QuantMode.floor_add))
         updategate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_z + h_z, 27, QuantMode.floor_add))
 
-        hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
-        reset_hidden = self._ste_round_to_scale(resetgate * hidden_q, 15, QuantMode.floor_add)
+        hidden_q = self._ste_round_to_scale(hidden, q_h, QuantMode.floor_add)
+        reset_hidden = self._ste_round_to_scale(resetgate * hidden_q, q_h, QuantMode.floor_add)
 
         gh_n = F.linear(reset_hidden, w_hh_n, b_hh_n)
         gh_n = biashh_quantizer(gh_n, scale_gh)
+        i_n = self._ste_round_to_scale(i_n, 27, QuantMode.floor_add)
+        gh_n = self._ste_round_to_scale(gh_n, 27, QuantMode.floor_add)
         newgate = QGRUTanhFunction.apply(self._ste_round_to_scale(i_n + gh_n, 27, QuantMode.floor_add))
-        hy = newgate + updategate * (hidden_q - newgate)
+        newgate_q = self._ste_round_to_scale(newgate, q_h, QuantMode.floor_add)
+        update_hidden = self._ste_round_to_scale(updategate * (hidden_q - newgate_q), q_h, QuantMode.floor_add)
+        hy = newgate_q + update_hidden
         return hy
 
     def forward(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, training,
@@ -248,10 +402,16 @@ class QGRUCell(nn.Module):
                 input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
                 biasih_quantizer, biashh_quantizer,
             )
-        return self._forward_venusa_arcs(
+        if QUANT_CONFIGS.platform == PlatForm.venusA:
+            return self._forward_venusa(
+                input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                biasih_quantizer, biashh_quantizer, training,
+            )
+        return self._forward_arcs_mars(
             input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
             input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-            biasih_quantizer, biashh_quantizer,
+            biasih_quantizer, biashh_quantizer, training,
         )
         
 
@@ -389,7 +549,7 @@ class QGRU(QModuleMixin, nn.GRU):
             self.output_quantizer.running_data.fill_(float(self.hidden_quantizer.running_data))
     
     def forward(self, input, *args, **kwargs):
-        hx = None if len(args) == 0 else args[0]
+        hx = kwargs.get("hx", None) if len(args) == 0 else args[0]
         if torch.onnx.is_in_onnx_export():
             return self.forward_onnx_export(input, hx)
         elif QUANT_CONFIGS.calibration:
@@ -398,6 +558,9 @@ class QGRU(QModuleMixin, nn.GRU):
             return self.forward_train(input, hx)
 
     def forward_onnx_export(self, input, hx=None):
+        if self.num_layers != 1:
+            raise NotImplementedError("QGRU ONNX export only supports num_layers == 1")
+
         orig_input = input
         lengths = None
         if isinstance(input, tuple):
@@ -412,12 +575,11 @@ class QGRU(QModuleMixin, nn.GRU):
         else:
             hidden_state = None
         output = None; hy = None
-        if hidden_state is not None:
-            batch_size = input.size(0) if self.batch_first else input.size(1)
-            seq_len = input.size(1) if self.batch_first else input.size(0)
-            lengths = torch.tensor([seq_len for i in range(batch_size)], dtype=torch.int64, device=input.device) if lengths is None else lengths
 
         qparam_dict = generate_onnx_qparam_dict(self, False)
+        qparam_dict['has_hidden_i'] = int(hidden_state is not None)
+        if 'qparam_dict_r' in qparam_dict:
+            qparam_dict['qparam_dict_r']['has_hidden_i'] = qparam_dict['has_hidden_i']
         weight_ih, weight_hh = self.qweight_ih_hh
         bias_ih, bias_hh = self.qbias_ih_hh
         if self.bidirectional:

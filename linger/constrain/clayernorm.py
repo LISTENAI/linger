@@ -20,7 +20,6 @@ class CLayerNorm(CModuleMixin, nn.LayerNorm):
             module.normalized_shape,
             module.eps,
             module.elementwise_affine,
-            None if module.bias is None else True,
             dtype=module.weight.dtype,
             device=device,
             constrain=constrain,

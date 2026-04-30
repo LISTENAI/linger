@@ -45,9 +45,11 @@ class QModuleTensor(torch.nn.Module):
                 # 量化处理
                 if isinstance(current_input, QTensor):
                     tmp_input = from_qtensor_to_tensor(current_input)
+                    self.input_quantizer[i].is_qtensor = True
                     self.input_quantizer[i].scale.fill_(current_input.scale.detach())
                     self.input_quantizer[i].data_bits = current_input.data_bits
                 else:
+                    self.input_quantizer[i].is_qtensor = False
                     tmp_input = self.input_quantizer[i](current_input)
                 processed_inputs.append(tmp_input)
             else:
@@ -74,10 +76,15 @@ class QModuleTensor(torch.nn.Module):
             
             if isinstance(current_input, QTensor):
                 tmp_input = from_qtensor_to_tensor(current_input)
+                self.input_quantizer[i].is_qtensor = True
                 self.input_quantizer[i].scale.fill_(current_input.scale.detach())
                 self.input_quantizer[i].data_bits = current_input.data_bits
-            else:
+            elif current_input.numel() != 0:
                 tmp_input = self.input_quantizer[i](current_input)
+                self.input_quantizer[i].is_qtensor = False
+            else:
+                tmp_input = current_input
+                self.input_quantizer[i].is_qtensor = False
             processed_inputs.append(tmp_input)
         
         return tuple([processed_inputs, input_list[1]])
@@ -143,4 +150,3 @@ class QModuleTensor(torch.nn.Module):
         main_str += extra_lines[0]
         main_str += ')'
         return main_str
-

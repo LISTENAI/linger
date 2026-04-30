@@ -10,6 +10,8 @@ from .qmatmul import QMatmul
 from .qcat import QCat
 from .qsigmoid import QSigmoid
 from .qtanh import QTanh
+from .qgelu import QGelu
+from .qswish import QSwish
 from .qsoftmax import QSoftmax
 from .qsqueeze import QSqueezeOnnxFunction
 from ..qconfig import *
@@ -17,6 +19,14 @@ from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor, 
 from ...quantizer import AQuantizer
 from ....config import QUANT_CONFIGS
 from ....onnx import generate_onnx_qparam_dict, QDOMAIN_NAME
+
+_GELU_OPS = [torch.nn.functional.gelu]
+if hasattr(torch.ops.aten, "gelu"):
+    _GELU_OPS.append(torch.ops.aten.gelu)
+
+_SWISH_OPS = [torch.nn.functional.silu]
+if hasattr(torch.ops.aten, "silu"):
+    _SWISH_OPS.append(torch.ops.aten.silu)
 
 # @register_qtensor_op([torch.ops.aten.add, torch.ops.aten.add_])
 # @register_qtensor_op([torch.add, torch._C.TensorBase.add, torch._C.TensorBase.add_])
@@ -189,6 +199,29 @@ def view(op, input, *size):
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *size)
 
+@register_qtensor_op([torch.Tensor.view_as])
+def view_as(op, input, *size):
+    assert isinstance(input, QTensor), 'input is not QTensor'
+    if isinstance(input, QTensor):
+        tmp_input = from_qtensor_to_tensor(input)
+        scale = input.scale.detach()
+        data_bits = input.data_bits
+        out = op(tmp_input, *size)
+        return from_tensor_to_qtensor(out, scale, data_bits)
+    return op(input, *size)
+
+@register_qtensor_op([torch.Tensor.chunk])
+def chunk(op, input, *args, **kwargs):
+    assert isinstance(input, QTensor), 'input is not QTensor'
+    if isinstance(input, QTensor):
+        tmp_input = from_qtensor_to_tensor(input)
+        scale = input.scale.detach()
+        data_bits = input.data_bits
+        out = op(tmp_input, *args, **kwargs)
+        res = [from_tensor_to_qtensor(i, scale, data_bits) for i in out]
+        return tuple(res)
+    return op(input, *args, **kwargs)
+
 @register_qtensor_op([torch.transpose, torch.Tensor.transpose])
 def transpose(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
@@ -259,15 +292,16 @@ def squeeze(op, input, *size):
     return op(input, *size)
 
 @register_qtensor_op([torch.unsqueeze, torch.Tensor.unsqueeze, torch.Tensor.unsqueeze_])
-def unsqueeze(op, input, *size):
+def unsqueeze(op, input, *args, **kwargs):
     assert isinstance(input, QTensor), 'input is not QTensor'
+
     if isinstance(input, QTensor):
         tmp_input = from_qtensor_to_tensor(input)
         scale = input.scale.detach()
         data_bits = input.data_bits
-        out = op(tmp_input, *size)
+        out = op(tmp_input, *args, **kwargs)
         return from_tensor_to_qtensor(out, scale, data_bits)
-    return op(input, *size)
+    return op(input, *args, **kwargs)
 
 @register_qtensor_op([torch.flatten, torch.Tensor.flatten])
 def flatten(op, input, *size):
@@ -301,6 +335,17 @@ def pad(op, input, pad, mode: str = ..., value: Optional[float] = None):
         out = op(tmp_input, pad, mode, value)
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, pad, mode, value)
+
+@register_qtensor_op([torch.nn.functional.dropout, torch.nn.functional.dropout1d, torch.nn.functional.dropout2d, torch.nn.functional.dropout3d, torch.nn.functional.feature_alpha_dropout, torch.nn.functional.alpha_dropout])
+def dropout(op, input, **kwargs):
+    assert isinstance(input, QTensor), 'input is not QTensor'
+    if isinstance(input, QTensor):
+        tmp_input = from_qtensor_to_tensor(input)
+        scale = input.scale.detach()
+        data_bits = input.data_bits
+        out = op(tmp_input, **kwargs)
+        return from_tensor_to_qtensor(out, scale, data_bits)
+    return op(input, **kwargs)
 
 @register_qtensor_op([torch.sigmoid, torch.sigmoid_, torch.Tensor.sigmoid, torch.Tensor.sigmoid_])
 def sigmoid(op, input):
@@ -344,6 +389,50 @@ def tanh(op, input):
     output = q_layer(input)
     return output
 
+@register_qtensor_op(_GELU_OPS)
+def gelu(op, input, approximate: str = "none"):
+    if approximate != "none":
+        return qfallback(op, input, approximate=approximate)
+
+    module_self = get_current_module()
+    if module_self is None:
+        return qfallback(op, input)
+
+    iname_index = getattr(module_self, LINGER_QTENSOR_LAYER_COUNTER)
+    setattr(module_self, LINGER_QTENSOR_LAYER_COUNTER, iname_index+1)
+    var_name = LINGER_QTENSOR_LAYERS_PREIFX + '_qgelu_' + str(iname_index)
+
+    if hasattr(module_self, var_name):
+        q_layer = getattr(module_self, var_name)
+    else:
+        q_layer = QGelu(activate_config=QUANT_CONFIGS.quant_info.to_dict(), num_input=1)
+        q_layer.training = module_self.training
+        q_layer = q_layer.to(input.device)
+        setattr(module_self, var_name, q_layer)
+    return q_layer(input)
+
+@register_qtensor_op(_SWISH_OPS)
+def swish(op, input, inplace: bool = False):
+    if inplace:
+        return qfallback(op, input, inplace=inplace)
+
+    module_self = get_current_module()
+    if module_self is None:
+        return qfallback(op, input, inplace=inplace)
+
+    iname_index = getattr(module_self, LINGER_QTENSOR_LAYER_COUNTER)
+    setattr(module_self, LINGER_QTENSOR_LAYER_COUNTER, iname_index+1)
+    var_name = LINGER_QTENSOR_LAYERS_PREIFX + '_qswish_' + str(iname_index)
+
+    if hasattr(module_self, var_name):
+        q_layer = getattr(module_self, var_name)
+    else:
+        q_layer = QSwish(activate_config=QUANT_CONFIGS.quant_info.to_dict(), num_input=1)
+        q_layer.training = module_self.training
+        q_layer = q_layer.to(input.device)
+        setattr(module_self, var_name, q_layer)
+    return q_layer(input)
+
 @register_qtensor_op([torch.softmax, torch._softmax, torch.Tensor.softmax, torch.nn.functional.softmax])
 def softmax(op, input, dim, _stacklevel: int = 3, dtype: Optional[DType] = None):
     module_self = get_current_module()
@@ -358,7 +447,7 @@ def softmax(op, input, dim, _stacklevel: int = 3, dtype: Optional[DType] = None)
     if hasattr(module_self, var_name):
         q_layer = getattr(module_self, var_name)
     else:
-        q_layer = QSoftmax(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input=2, dim = dim)
+        q_layer = QSoftmax(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input=1, dim = dim)
         q_layer.training = module_self.training
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)

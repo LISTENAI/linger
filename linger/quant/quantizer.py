@@ -153,11 +153,11 @@ class Quantizer(torch.nn.Module, ):
                 # self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
             else:
                 raise ValueError("Only TQT and MOM strategies are supported! ")
-            learning_data = self.quant_round(learning_data_temp, QuantMode.round) #self.round_mode
-            scale = 2**learning_data
+            learning_data = (self.quant_round(learning_data_temp, QuantMode.round)).clamp(min=0, max=23) #self.round_mode
+            scale = torch.exp2(learning_data)
             # scale = scale.clamp(min=1e-6, max=2**24)
         else:
-            scale = scale_bias
+            scale = scale_bias.clamp(min=1, max=2**23)
 
         if hasattr(self, "min_scale") and scale > self.min_scale:
             scale = self.min_scale
@@ -187,11 +187,11 @@ class Quantizer(torch.nn.Module, ):
                 self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
 
             scale_top = self.quant_max / self.running_data
-            scale_top = 2**self.quant_round(torch.log2(scale_top), QuantMode.ceil).double()
+            scale_top = torch.exp2(self.quant_round(torch.log2(scale_top), QuantMode.ceil))
             inputs_q_top = (self.quant_round(input * scale_top, self.round_mode).clamp(
                 self.quant_min, self.quant_max)) / scale_top
             scale_bottom = self.quant_max / self.running_data
-            scale_bottom = 2**self.quant_round(torch.log2(scale_bottom), QuantMode.floor).double()
+            scale_bottom = torch.exp2(self.quant_round(torch.log2(scale_bottom), QuantMode.floor))
             inputs_q_bottom = (self.quant_round(input * scale_bottom, self.round_mode).clamp(
                 self.quant_min, self.quant_max)) / scale_bottom
             score_top = lp_loss(input, inputs_q_top, p=2.4, reduction='all')
@@ -202,7 +202,7 @@ class Quantizer(torch.nn.Module, ):
         else:
             scale = scale_bias
         
-        scale = scale.clamp(min=1e-6, max=2**24)
+        scale = scale.clamp(min=1, max=2**23)
 
         x_s = input * scale
         x_int = self.quant_round(x_s, self.round_mode)
@@ -233,8 +233,10 @@ class Quantizer(torch.nn.Module, ):
                     self.is_init.fill_(True)
                 else:
                     self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+                # 这里scale的clamp(min=0,max=31)是在cuda代码里实现的
                 out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, self.running_data.log2(), min_scale, self.quant_min, self.quant_max)
         else:
+            scale_bias = scale_bias.clamp(min=1, max=2**23)
             out = BIASQUANT.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
             scale_tmp = scale_bias.detach()
         self.scale.fill_(scale_tmp) # MOM也必须要给scale初始化，便于后续(如bias)调用当前模块scale时保持正确
@@ -276,7 +278,7 @@ class Quantizer(torch.nn.Module, ):
         if scale is None:
             if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
                 learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
-                self.scale.fill_(float((2 ** (self.quant_round(learning_data, self.round_mode)))))
+                self.scale.fill_(float(torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23))))
             scale = self.scale
         if QUANT_CONFIGS.quant_method == FakeQuantMethod.CUDA:
             out = BIASQUANT.apply(input, self.data_bits, scale, min_scale, self.quant_min, self.quant_max)
@@ -316,7 +318,7 @@ class Quantizer(torch.nn.Module, ):
         with torch.no_grad():
             if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
                 learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
-                self.scale.fill_(float((2 ** (self.quant_round(learning_data, self.round_mode)))))
+                self.scale.fill_(float((torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23)))))
         return super().state_dict(*args, **kwargs)
     
     @property
@@ -339,8 +341,6 @@ class AQuantizer(Quantizer):
         self.activation_type = quantizer_cfg.get('activation_type', None)
         self.is_bias_quantizer = False
         self.calibrate_name = quantizer_cfg.get('a_calibrate_name', "top_10")
-        # self.quant_min = - 2 ** (self.data_bits - 1)
-        # self.quant_max = 2 ** (self.data_bits - 1) - 1
 
         self.clamp_value = None if constrain is None else constrain.get('clamp_activation_value', None)
         
@@ -355,8 +355,6 @@ class WQuantizer(Quantizer):
         self.is_perchannel = quantizer_cfg.get('is_perchannel', False)
         self.is_bias_quantizer = False
         self.calibrate_name = quantizer_cfg.get('w_calibrate_name', "abs_max")
-        # self.quant_min = - 2 ** (self.data_bits - 1)
-        # self.quant_max = 2 ** (self.data_bits - 1) - 1
 
         self.clamp_value = None if constrain is None else constrain.get('clamp_weight_value', None)
         self.clamp_factor = None if constrain is None else constrain.get('clamp_factor_value', None)
@@ -372,8 +370,6 @@ class BQuantizer(Quantizer):
         self.quant_strategy = quantizer_cfg.get('w_strategy', QuantStrategy.RANGE_MEAN)
         self.is_bias_quantizer = True
         self.calibrate_name = quantizer_cfg.get('w_calibrate_name', "abs_max")
-        # self.quant_min = - 2 ** (self.data_bits - 1)
-        # self.quant_max = 2 ** (self.data_bits - 1) - 1
 
         self.clamp_value = None if constrain is None else constrain.get('clamp_bias_value', None)
         self.round_mode = QuantMode.round

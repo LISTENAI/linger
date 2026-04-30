@@ -44,7 +44,7 @@ std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(
     // printf("到位置 2 了 \n");
     // 计算 scale
     float f = (float)(bit - 1) - factor;
-    float scale = powf(2.0f, roundf(f));
+    float scale = powf(2.0f, fminf(fmaxf(roundf(f), 0.0f), 23.0f));
     // scale = fminf(fmaxf(scale, 1e-6f), powf(2.0f, 32));
     // printf("到位置 1 了,scale:%f \n", scale);
     auto output = torch::empty_like(input);
@@ -84,7 +84,7 @@ std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(
 std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(
     torch::Tensor input,
     int bit,
-    float scale,
+    float scale, // 这里scale是在python代码里进行clamp到0-31的
     float scale_min,
     float quant_min,
     float quant_max) {
@@ -175,7 +175,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, float> fake_quant_cuda_w
     // printf("到位置 2 了 \n");
     // 计算 scale
     float f = (float)(bit - 1) - factor;
-    float scale = powf(2.0f, roundf(f));
+    float scale = powf(2.0f, fminf(fmaxf(roundf(f), 0.0f), 23.0f));
     // scale = fminf(fmaxf(scale, 1e-6f), powf(2.0f, 32));
     // printf("到位置 1 了,scale:%f \n", scale);
     auto output = torch::empty_like(input);
@@ -218,7 +218,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, float> fake_quant_cuda_w
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(
     torch::Tensor input,
     int bit,
-    float scale,
+    float scale, // 这里的scale是在python里clamp的
     float scale_min,
     float quant_min,
     float quant_max) {

@@ -9,7 +9,7 @@ from .qtensor_mod import QModuleTensor
 from ..qconfig import register_qmodule
 from ....config import QUANT_CONFIGS
 from ....utils import PlatForm
-from ....onnx import generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....onnx import generate_onnx_qparam_dict, quant_qtensor_symbolic_input, QDOMAIN_NAME
 
 import lingerext
 
@@ -22,7 +22,7 @@ class QSigmoidOnnxFunction(torch.autograd.Function):
         op_type = qparam_dict.get("op_type", "QGeneric")
         node_name = f"{QDOMAIN_NAME}::{op_type}"
         qparam_dict.pop('op_type', None)
-        input_list = [input]
+        input_list = [quant_qtensor_symbolic_input(g, input, qparam_dict, 0)]
         return g.op(
                 node_name,
                 *input_list,
@@ -107,4 +107,3 @@ class QSigmoid(QModuleTensor):
                 return QSigmoidFunction.apply(x, self.input_quantizer[0])
             else:
                 return QSigmoidFunction.apply(x, self.input_quantizer)
-

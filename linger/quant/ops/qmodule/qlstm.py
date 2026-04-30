@@ -28,6 +28,12 @@ def luna_requant(x_int, scale_x, scale_y):
         x_int = (x_int * pow(2, l_scale) + 0.5).floor().int()
     return x_int
 
+
+def _select_direction_state(g, state, direction):
+    index = torch.tensor([direction], dtype=torch.long)
+    index_node = g.op("Constant", value_t=index)
+    return g.op("Gather", state, index_node, axis_i=0)
+
 class QLSTMSigmoidFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input):
@@ -133,6 +139,8 @@ class QLSTMOnnxFunction(torch.autograd.Function):
 
         op_type = qparam_dict.get("op_type", "QGeneric")
         is_input_qtensor = qparam_dict.get("is_input_qtensor", None)
+        has_hidden = bool(qparam_dict.get("has_hidden_i", 0))
+        has_cell = bool(qparam_dict.get("has_cell_i", 0))
         node_name = f"{QDOMAIN_NAME}::{op_type}"
         qparam_dict.pop('op_type', None)
         qparam_dict.pop('is_input_qtensor', None)
@@ -145,6 +153,10 @@ class QLSTMOnnxFunction(torch.autograd.Function):
             input_list = [op_inner, weight_ih, weight_hh]
         else:
             input_list = [input, weight_ih, weight_hh]
+        if has_hidden and has_cell:
+            hidden_state_f = hidden_state if qparam_dict_r is None else _select_direction_state(g, hidden_state, 0)
+            cell_state_f = cell_state if qparam_dict_r is None else _select_direction_state(g, cell_state, 0)
+            input_list[1:1] = [hidden_state_f, cell_state_f]
         if bias_ih is not None:
             input_list.append(bias_ih)
             input_list.append(bias_hh)
@@ -156,6 +168,11 @@ class QLSTMOnnxFunction(torch.autograd.Function):
                 input_list_r = [op_inner, weight_ih_reverse, weight_hh_reverse]
             else:
                 input_list_r = [input, weight_ih_reverse, weight_hh_reverse]
+            if has_hidden and has_cell:
+                input_list_r[1:1] = [
+                    _select_direction_state(g, hidden_state, 1),
+                    _select_direction_state(g, cell_state, 1),
+                ]
             if bias_ih_reverse is not None:
                 input_list_r.append(bias_ih_reverse)
                 input_list_r.append(bias_hh_reverse)
@@ -351,12 +368,16 @@ class QLSTM(QModuleMixin, nn.LSTM):
     
     def update_output_quantizer_running_data(self, direct):
         if direct:
+            if self.output_reverse_quantizer.qat_method == QatMethod.TQT:
+                return
             self.output_reverse_quantizer.running_data.fill_(float(self.hidden_reverse_quantizer.running_data))
         else:
+            if self.output_quantizer.qat_method == QatMethod.TQT:
+                return
             self.output_quantizer.running_data.fill_(float(self.hidden_quantizer.running_data))
     
     def forward(self, input, *args, **kwargs):
-        hx = None if len(args) == 0 else args[0]
+        hx = kwargs.get("hx", None) if len(args) == 0 else args[0]
         if torch.onnx.is_in_onnx_export():
             return self.forward_onnx_export(input, hx)
         elif QUANT_CONFIGS.calibration:
@@ -365,6 +386,9 @@ class QLSTM(QModuleMixin, nn.LSTM):
             return self.forward_train(input, hx)
 
     def forward_onnx_export(self, input, hx=None):
+        if self.num_layers != 1:
+            raise NotImplementedError("QLSTM ONNX export only supports num_layers == 1")
+
         orig_input = input
         lengths = None
         if isinstance(orig_input, tuple):
@@ -375,18 +399,21 @@ class QLSTM(QModuleMixin, nn.LSTM):
         input = self.quantize_lstm_input(input)
 
         if hx is not None:
+            if len(hx) != 2:
+                raise RuntimeError("For batched 3-D input, hx should be a tuple of two tensors")
             hidden_state, cell_state = hx
         else:
             hidden_state = None
             cell_state = None
 
         output = None; hy = None; cy = None
-        if hx is not None:
-            batch_size = input.size(0) if self.batch_first else input.size(1)
-            seq_len = input.size(1) if self.batch_first else input.size(0)
-            lengths = torch.tensor([seq_len for i in range(batch_size)], dtype=torch.int64, device=input.device) if lengths is None else lengths
 
         qparam_dict = generate_onnx_qparam_dict(self, False)
+        qparam_dict['has_hidden_i'] = int(hidden_state is not None)
+        qparam_dict['has_cell_i'] = int(cell_state is not None)
+        if 'qparam_dict_r' in qparam_dict:
+            qparam_dict['qparam_dict_r']['has_hidden_i'] = qparam_dict['has_hidden_i']
+            qparam_dict['qparam_dict_r']['has_cell_i'] = qparam_dict['has_cell_i']
         # fake_quant weight, bias
         weight_ih, weight_hh = self.qweight_ih_hh
         bias_ih, bias_hh = self.qbias_ih_hh
@@ -715,4 +742,3 @@ class QLSTM(QModuleMixin, nn.LSTM):
         else:
             hiddens = None
         return hiddens
-

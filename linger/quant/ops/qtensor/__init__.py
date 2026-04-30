@@ -7,3 +7,5 @@ from .qmatmul import QMatmul
 from .qsoftmax import QSoftmax
 from .qsigmoid import QSigmoid, QSigmoidFunction
 from .qtanh import QTanh
+from .qgelu import QGelu
+from .qswish import QSwish

@@ -22,7 +22,7 @@ static __device__ int32_t shift_pure(int64_t v, int32_t s)
 	} else {
 		v = v >> (-s);
 	}
-	return SATURATE(v, 32);
+	return v;
 }
 
 static __device__ int32_t sub32s(int32_t a, int32_t b)
@@ -98,6 +98,7 @@ static __device__ int64_t shfit_floor_x05_int64(int64_t x, int32_t shift)
 static __device__ void venusa_qsoftmax_c(const int* __restrict__ x_ptr, int* __restrict__ y_ptr, int32_t N, int32_t* p23)
 {
 	int32_t max_value = x_ptr[0];
+	int32_t data = 0;
 	int32_t X = 0;
 	int64_t Y = 0;
 	int32_t E = 0;
@@ -112,8 +113,8 @@ static __device__ void venusa_qsoftmax_c(const int* __restrict__ x_ptr, int* __r
 
 	for (int i = 0; i < N; i++)
 	{
-		X = sub32s(x_ptr[i] ,max_value);
-        X = shfit_floor_x05_int64((int64_t)X * (int64_t)774541002, 31);
+		data = sub32s(x_ptr[i] ,max_value);
+        X = shfit_floor_x05_int64((int64_t)data * (int64_t)774541002, 31);
 		// X = shift_rasyms((int64_t)X * (int64_t)774541002,-31);
 		E = X >> 23;
 		E = E + 1;
@@ -207,4 +208,3 @@ torch::Tensor venusa_qsoftmax_gpu(const torch::Tensor& in, int64_t dim)
 	
 	return out;
 }
-

@@ -12,18 +12,18 @@ from ....utils import PlatForm
 
 import lingerext
 
-from ....onnx import generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....onnx import generate_onnx_qparam_dict, quant_qtensor_symbolic_input, QDOMAIN_NAME
 
 class QSoftmaxOnnxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, dim, qparam_dict = None):
-        return F.softmax(x, dim)
+        return torch.softmax(x, dim)
     @staticmethod
     def symbolic(g, input, dim, qparam_dict = None):
         op_type = qparam_dict.get("op_type", "QGeneric")
         node_name = f"{QDOMAIN_NAME}::{op_type}"
         qparam_dict.pop('op_type', None)
-        input_list = [input]
+        input_list = [quant_qtensor_symbolic_input(g, input, qparam_dict, 0)]
         qparam_dict['axis_i'] = int(dim)
         return g.op(
                 node_name,
@@ -111,9 +111,8 @@ class QSoftmax(QModuleTensor):
     def forward(self, x, *args, **kwargs):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, True)
-            return QSoftmaxOnnxFunction.apply(input, self.dim, qparam_dict)
+            return QSoftmaxOnnxFunction.apply(x, self.dim, qparam_dict)
         elif QUANT_CONFIGS.calibration:
             return F.softmax(x, self.dim)
         else:
             return QSoftmaxFunction.apply(x, self.dim)
-
