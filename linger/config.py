@@ -109,6 +109,7 @@ class QuantConfig(Singleton):
 
     clamp_info   = ClampInfo()
     quant_info   = QuantInfo()
+    mix_parts    = []   # [{'name': [...], 'quant_info': QuantInfo, 'clamp_info': ClampInfo}, ...]
 
     @classmethod
     def _load_from_yaml(cls, config_path: str):
@@ -124,8 +125,30 @@ class QuantConfig(Singleton):
         except:
             raise ValueError(f"加载配置失败: {config_path}")
 
-        # 设置属性
+        # 设置全局属性
         cls._update_from_dict(config_data)
+
+        # 解析混合精度 partX 节（含 name 子键的 dict 均视为 part）
+        cls.mix_parts = []
+        _known_keys = {'open_quant', 'quant_method', 'device', 'dtype', 'seed',
+                       'calibration', 'platform', 'clamp_info', 'quant_info', 'mix_parts'}
+        for key, value in config_data.items():
+            if key in _known_keys or not isinstance(value, dict) or 'name' not in value:
+                continue
+            part_quant_raw = value.get('quant_info', {})
+            part_quant_info = QuantInfo()
+            if 'quant_info' in value:
+                part_quant_info._update_from_dict(part_quant_raw)
+            part_clamp_info = ClampInfo()
+            if 'clamp_info' in value and isinstance(value['clamp_info'], dict):
+                part_clamp_info.__dict__.update(value['clamp_info'])
+            cls.mix_parts.append({
+                'name': list(value['name']),
+                'quant_info': part_quant_info,
+                'clamp_info': part_clamp_info,
+                'input_bits': part_quant_raw.get('input_bits', None),
+                'output_bits': part_quant_raw.get('output_bits', None),
+            })
 
     @classmethod
     def _save_to_yaml(cls, config_path: str):

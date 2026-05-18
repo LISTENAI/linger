@@ -25,6 +25,30 @@ INT16_ELEM_TYPE = onnx.TensorProto.INT16
 INT32_ELEM_TYPE = onnx.TensorProto.INT32
 INT64_ELEM_TYPE = onnx.TensorProto.INT64
 BOOL_ELEM_TYPE = onnx.TensorProto.BOOL
+LAYERNORM_NORMAL_SCALE = 2 ** 15
+STANDARD_QUANT_PASSTHROUGH_OPS = {
+    "Identity",
+    "Reshape",
+    "Transpose",
+    "Squeeze",
+    "Unsqueeze",
+    "Flatten",
+    "Slice",
+    "Pad",
+    "Gather",
+    "Expand",
+    "Tile",
+    "Relu",
+}
+STANDARD_QUANT_INPUT_OPS = STANDARD_QUANT_PASSTHROUGH_OPS | {
+    "Split",
+    "MaxPool",
+    "Shape",
+    "Cast",
+}
+CUSTOM_QUANT_PASSTHROUGH_OPS = {
+    "Squeeze",
+}
 
 def _quant_mode_from_name(mode_name):
     if isinstance(mode_name, bytes):
@@ -86,6 +110,11 @@ def _get_attr_value(node, *names):
             if attr.type == onnx.AttributeProto.STRING:
                 return attr.s
     return None
+
+
+def _get_layernorm_normal_scale(node):
+    scale = _get_attr_value(node, "scale_y_normal", "scale_y_normal_f", "scale_y_norm", "scale_y_norm_f")
+    return LAYERNORM_NORMAL_SCALE if scale is None else scale
 
 
 def _quantize_initializer_like(graph, initializer_map, node, input_index, quantized_array, cache):
@@ -167,6 +196,16 @@ def _get_direct_quant_spec_for_input(node, input_index):
             return {"scale": scale_w, "bits": w_bits, "quant_mode": QuantMode.round}
         return None
 
+    if node.op_type in {"QLayerNorm", "LayerNormInt"}:
+        if input_index == 1 and scale_w is not None:
+            return {"scale": scale_w, "bits": w_bits, "quant_mode": QuantMode.round}
+        if input_index == 2 and scale_w is not None:
+            return {
+                "scale": _get_layernorm_normal_scale(node) * scale_w,
+                "bits": 32,
+                "quant_mode": QuantMode.round,
+            }
+
     prefixes = []
     if input_index == 0:
         prefixes = ["x", "x_0"]
@@ -189,11 +228,30 @@ def _get_direct_quant_spec_for_input(node, input_index):
     return None
 
 
+def _get_quant_node_input_spec(node, input_index):
+    if node.domain != QDOMAIN_NAME or node.op_type != "Quant" or input_index != 0:
+        return None
+
+    scale = _get_attr_value(node, "scale_x", "scale_x_f")
+    if scale is None:
+        return None
+    bits = _get_attr_value(node, "data_bits", "data_bits_i", "x_bits", "x_bits_i")
+    bits = 8 if bits is None else int(bits)
+    quant_mode = _quant_mode_from_name(_get_attr_value(node, "quant_mode", "quant_mode_s"))
+    return {"scale": scale, "bits": bits, "quant_mode": quant_mode}
+
+
 def _get_passthrough_outputs(node, input_index):
     if node.op_type in {"Identity", "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Flatten", "Slice", "Pad", "Gather"}:
         return list(node.output) if input_index == 0 else []
     if node.op_type in {"Expand", "Tile"}:
         return list(node.output) if input_index == 0 else []
+    if node.op_type == "Split":
+        return list(node.output) if input_index == 0 else []
+    if node.op_type == "MaxPool":
+        return [node.output[0]] if input_index == 0 and len(node.output) > 0 else []
+    if node.op_type == "Where":
+        return list(node.output) if input_index in {1, 2} else []
     if node.op_type == "Concat":
         return list(node.output)
     return []
@@ -230,7 +288,9 @@ def _find_downstream_quant_spec(graph, start_node, start_input_index, max_hops=1
         visited.add(value_name)
 
         for consumer_node, consumer_input_index in consumer_map.get(value_name, []):
-            spec = _get_direct_quant_spec_for_input(consumer_node, consumer_input_index)
+            spec = _get_quant_node_input_spec(consumer_node, consumer_input_index)
+            if spec is None:
+                spec = _get_direct_quant_spec_for_input(consumer_node, consumer_input_index)
             if spec is not None:
                 found_specs.append(spec)
                 continue
@@ -354,7 +414,7 @@ def _cast_output_state(node, fallback_state):
     return _make_tensor_state(elem_type)
 
 
-def _custom_output_states(node):
+def _custom_output_states(node, input_states):
     output_count = len(node.output)
     if output_count == 0:
         return []
@@ -377,6 +437,10 @@ def _custom_output_states(node):
         if scale is not None:
             return [_make_quant_state(scale, bits) for _ in node.output]
 
+    if node.op_type in CUSTOM_QUANT_PASSTHROUGH_OPS:
+        first_state = input_states[0] if input_states else _make_float_state()
+        return [_copy_state(first_state) for _ in node.output]
+
     scale = _get_attr_value(node, "scale_o", "scale_o_f", "scale_add_o", "scale_add_o_f")
     bits = _get_attr_value(node, "o_bits", "o_bits_i")
     if scale is None or bits is None:
@@ -393,24 +457,7 @@ def _custom_output_states(node):
 def _standard_op_accepts_quant_input(node, input_index):
     if input_index != 0 and node.op_type not in {"Equal"}:
         return False
-    if node.op_type in {
-        "Identity",
-        "Reshape",
-        "Transpose",
-        "Squeeze",
-        "Unsqueeze",
-        "Flatten",
-        "Slice",
-        "Pad",
-        "Gather",
-        "Expand",
-        "Tile",
-        "Split",
-        "Relu",
-        "MaxPool",
-        "Shape",
-        "Cast",
-    }:
+    if node.op_type in STANDARD_QUANT_INPUT_OPS:
         return True
     if node.op_type == "Equal":
         return True
@@ -419,7 +466,11 @@ def _standard_op_accepts_quant_input(node, input_index):
 
 def _node_accepts_quant_input(node, input_index):
     if node.domain == QDOMAIN_NAME:
-        return node.op_type == "Dequant" or _get_direct_quant_spec_for_input(node, input_index) is not None
+        return (
+            node.op_type == "Dequant"
+            or (input_index == 0 and node.op_type in CUSTOM_QUANT_PASSTHROUGH_OPS)
+            or _get_direct_quant_spec_for_input(node, input_index) is not None
+        )
     return _standard_op_accepts_quant_input(node, input_index)
 
 
@@ -431,20 +482,7 @@ def _infer_standard_output_states(node, input_states, elem_types):
     first_state = input_states[0] if input_states else _make_float_state()
     first_output_type = elem_types.get(node.output[0])
 
-    if node.op_type in {
-        "Identity",
-        "Reshape",
-        "Transpose",
-        "Squeeze",
-        "Unsqueeze",
-        "Flatten",
-        "Slice",
-        "Pad",
-        "Gather",
-        "Expand",
-        "Tile",
-        "Relu",
-    } and _is_quantized_state(first_state):
+    if node.op_type in STANDARD_QUANT_PASSTHROUGH_OPS and _is_quantized_state(first_state):
         return [_copy_state(first_state) for _ in node.output]
 
     if node.op_type == "Split" and _is_quantized_state(first_state):
@@ -478,7 +516,7 @@ def _infer_standard_output_states(node, input_states, elem_types):
 
 def _infer_node_output_states(node, input_states, elem_types):
     if node.domain == QDOMAIN_NAME:
-        return _custom_output_states(node)
+        return _custom_output_states(node, input_states)
     return _infer_standard_output_states(node, input_states, elem_types)
 
 
@@ -618,8 +656,9 @@ def _find_quant_boundary_errors(graph):
 
 def _fold_initializer_quant_nodes(onnx_model):
     graph = onnx_model.graph
-    initializer_names = {initializer.name for initializer in graph.initializer}
+    initializer_map = {initializer.name: initializer for initializer in graph.initializer}
     graph_output_names = {output.name for output in graph.output}
+    quantized_cache = {}
     replacements = {}
 
     for node in graph.node:
@@ -627,8 +666,27 @@ def _fold_initializer_quant_nodes(onnx_model):
             continue
         if len(node.input) != 1 or len(node.output) != 1:
             continue
-        if node.input[0] not in initializer_names or node.output[0] in graph_output_names:
+        if node.input[0] not in initializer_map or node.output[0] in graph_output_names:
             continue
+        spec = _get_quant_node_input_spec(node, 0)
+        input_array = numpy_helper.to_array(initializer_map[node.input[0]])
+        if input_array.dtype.kind in {"f"}:
+            if spec is None or spec["scale"] is None:
+                continue
+            quantized_array = quant_weight_bias(
+                input_array,
+                spec["bits"],
+                spec["scale"],
+                spec["quant_mode"],
+            )
+            _quantize_initializer_like(
+                graph,
+                initializer_map,
+                node,
+                0,
+                quantized_array,
+                quantized_cache,
+            )
         replacements[node.output[0]] = node.input[0]
 
     if not replacements:
@@ -672,12 +730,18 @@ def _shorten_tensor_names(onnx_model):
     def _rename(name):
         return rename_map.get(name, name)
 
+    def _rename_node(node):
+        output_name = next((output_name for output_name in node.output if output_name), None)
+        if output_name is not None:
+            node.name = f"{node.op_type}_{output_name}"
+
     def _rename_graph_values(target_graph):
         for node in target_graph.node:
             for index, input_name in enumerate(node.input):
                 node.input[index] = _rename(input_name)
             for index, output_name in enumerate(node.output):
                 node.output[index] = _rename(output_name)
+            _rename_node(node)
             for attr in node.attribute:
                 if attr.type == onnx.AttributeProto.GRAPH:
                     _rename_graph_values(attr.g)
@@ -1029,6 +1093,8 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict['dim_i'] = int(cls.dim)
         qparam_dict.pop('y_bits_i', None)
         qparam_dict.pop('scale_y_f', None)
+    elif 'LayerNorm' in qparam_dict['op_type']:
+        qparam_dict['scale_y_normal_f'] = float(LAYERNORM_NORMAL_SCALE)
     elif 'ConvTranspose' in qparam_dict['op_type']:
         qparam_dict['dilations_i'] = cls.dilation
         qparam_dict['kernel_shape_i'] = cls.kernel_size

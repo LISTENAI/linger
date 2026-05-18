@@ -13,6 +13,8 @@ from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 import lingerext
 
+QLAYERNORM_NORMAL_SCALE = 2 ** 15
+
 class QLayerNormOnnxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, normalized_shape, weight, bias, eps, qparam_dict=None):
@@ -76,11 +78,11 @@ class QLayerNormFunction(torch.autograd.Function):
         numerator = N * x_2d
         numerator = numerator - sum_x
         q_y_normal = lingerext.qlayernorm_kernel_forward(numerator.int(), denominator.long(), math.log2(scale_x.data))
-        scale_y_normal = 2**10
+        scale_y_normal = QLAYERNORM_NORMAL_SCALE
 
         # === 3 reshape back to original
         q_y_normal = q_y_normal.view(input.shape)
-        q_y_normal.clamp_(-2**15, 2**15-1)
+        q_y_normal.clamp_(-2**31, 2**31-1)
         q_output = q_y_normal * q_weight
         if bias is not None:
             q_bias = bias_quantizer.quant_round(bias * scale_y_normal * scale_w, bias_quantizer.round_mode)
@@ -153,6 +155,15 @@ class QLayerNorm(QModuleMixin, nn.LayerNorm):
             constrain = constrain
         )
 
+    @property
+    def qbias(self):
+        if not hasattr(self, "bias_quantizer") or self.bias is None:
+            return self.bias
+        return self.bias_quantizer(
+            self.bias,
+            self.weight_quantizer.scale * QLAYERNORM_NORMAL_SCALE,
+        )
+
     def forward(self, input):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
@@ -164,4 +175,3 @@ class QLayerNorm(QModuleMixin, nn.LayerNorm):
                 input, self.qweight, self.bias, self.normalized_shape, self.eps,
                 self.input_quantizer, self.weight_quantizer, self.bias_quantizer, self.training
             )
-

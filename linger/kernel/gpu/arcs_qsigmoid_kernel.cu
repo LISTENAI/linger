@@ -4,14 +4,8 @@
 #include <vector>
 #include <stdint.h>
 
-#define MAX_BITS(bits) ((1LL << (bits - 1)) - 1)
-#define MIN_BITS(bits) (-(1LL << (bits - 1)))
-#define SATURATE(x, bits)                \
-  ((x) > MAX_BITS(bits) ? MAX_BITS(bits) \
-                        : ((x) < MIN_BITS(bits) ? MIN_BITS(bits) : (x)))
-
 __global__ void arcs_qsigmoid_gpu_kernel(const int* __restrict__ a,
-                             int* __restrict__ c, 
+                             int64_t* __restrict__ c, 
                             int32_t len, uint32_t* bands , uint32_t* slopes,
                             uint32_t* bias0s , uint32_t* bias1s)
 {
@@ -21,9 +15,7 @@ __global__ void arcs_qsigmoid_gpu_kernel(const int* __restrict__ a,
     int64_t absx = 0;
     int64_t slope = 0;
     int64_t bias = 0;
-    int32_t shift = 0;
     int64_t tmp = 0;
-    int64_t out = 0;
 	
     if (idx < len)
     {
@@ -61,12 +53,10 @@ __global__ void arcs_qsigmoid_gpu_kernel(const int* __restrict__ a,
 			{
 				slope = 0;
 				bias = 0;
-				shift = 0;
 			}
 		}
 
-		out = ((slope * tmp) >> 27) + bias;
-		c[idx] = SATURATE(out, 32);
+		c[idx] = ((slope * tmp) >> 27) + bias;
     }
 }
 
@@ -75,9 +65,9 @@ torch::Tensor arcs_qsigmoid_gpu(torch::Tensor a)
     int32_t N = a.numel();
     const int threads = 64;
     const dim3 blocks((N + threads - 1) / threads, threads);
-    auto c = torch::zeros_like(a);
+    auto c = torch::empty(a.sizes(), a.options().dtype(torch::kInt64));
     const int* a_ptr= a.data_ptr<int>();
-    int * c_ptr = c.data_ptr<int>();
+    int64_t * c_ptr = c.data_ptr<int64_t>();
 	static const uint32_t bands[] = {0, 63656107, 111395083, 153816608, 194953701, 236865036, 281253298, 329433241, 384154475, 447714743, 515399149, 589016819, 679940425, 759830874, 862986200, 965402453, 2147483648};
 	static const uint32_t slopes[] = {529475578, 482862538, 424212188, 361565531, 298613704, 238039992, 181912633, 132002182, 89144402, 56020914, 34019888, 18928477, 9459126, 5291645, 2204341, 177654};
 	static const uint32_t bias0s[] = {1073741824, 1095849221, 1144526551, 1216321063, 1307759740, 1414659140, 1532274042, 1654777693, 1777444109, 1887935281, 1972419725, 2038648643, 2086619912, 2110212774, 2130063364, 2144640936};
@@ -106,4 +96,3 @@ torch::Tensor arcs_qsigmoid_gpu(torch::Tensor a)
 
     return c;
 }
-

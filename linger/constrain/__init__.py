@@ -4,6 +4,7 @@ from .cconv1d import *
 from .cconv2d import *
 from .cconvbn1d import *
 from .cconvbn2d import *
+from .cbatchnorm1d import *
 from .cbatchnorm2d import *
 from .cconvtranspose1d import *
 from .cconvtranspose2d import *

@@ -121,7 +121,7 @@ __device__ void calc_data_mul_vs(const int32_t *src, int32_t scalar, int32_t *ds
 
 __device__ int32_t calc_sqrt_reciprocal(const int64_t data, int32_t *table, int32_t q_x, int32_t *table_shift)
 {
-	const int q_normal = 10;	//normalize(-32, 32)
+	const int q_normal = 15;	//normalize(-32, 32)
 	const int q2 = 14;
 	int64_t temp;
 	int q1;

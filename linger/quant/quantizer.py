@@ -275,11 +275,11 @@ class Quantizer(torch.nn.Module, ):
         else:
             min_scale = float("inf")
         # 推理时固定走cuda路线，若为TQT模式，通过learning_data保存scale，若为MOM模式，通过running_data重新初始化scale
-        if scale is None:
-            if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
-                learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
-                self.scale.fill_(float(torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23))))
-            scale = self.scale
+        # if scale is None:
+        #     if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
+        #         learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
+        #         self.scale.fill_(float(torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23))))
+        scale = self.scale
         if QUANT_CONFIGS.quant_method == FakeQuantMethod.CUDA:
             out = BIASQUANT.apply(input, self.data_bits, scale, min_scale, self.quant_min, self.quant_max)
         else:
@@ -314,12 +314,12 @@ class Quantizer(torch.nn.Module, ):
                 fake_input = self.fake_quant_native(input, scale)
         return fake_input
     
-    def state_dict(self, *args, **kwargs):
-        with torch.no_grad():
-            if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
-                learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
-                self.scale.fill_(float((torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23)))))
-        return super().state_dict(*args, **kwargs)
+    # def state_dict(self, *args, **kwargs):
+    #     with torch.no_grad():
+    #         if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
+    #             learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
+    #             self.scale.fill_(float((torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23)))))
+    #     return super().state_dict(*args, **kwargs)
     
     @property
     def quant_min(self):

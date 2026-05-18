@@ -2,15 +2,15 @@ import math
 import copy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import _VF
 
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Dict, Any
 from torch.nn.utils.rnn import PackedSequence
 
-from ..qtensor import QSigmoidFunction
+from ..qtensor.qsigmoid import RUNTIME_SIGMOID_PLATFORMS, sigmoid_requant_to_qbits, sigmoid_runtime_qbits
+from ..qtensor.qtanh import RUNTIME_TANH_PLATFORMS, tanh_requant_to_qbits, tanh_runtime_qbits
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ....config import QUANT_CONFIGS
@@ -19,95 +19,194 @@ from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 import lingerext
 
-def luna_requant(x_int, scale_x, scale_y):
-    l_scale = scale_y - scale_x
-    
-    if l_scale > 0:
-        x_int = x_int * pow(2, l_scale)
+RUNTIME_EXACT_PLATFORMS = {PlatForm.venus, PlatForm.venusA, PlatForm.arcs, PlatForm.mars}
+
+
+def scale_to_bits(scale):
+    scale_value = float(scale)
+    scale_bits = math.log2(scale_value)
+    assert abs(scale_bits - round(scale_bits)) < 1e-6, f"scale {scale_value} is not power-of-two"
+    return int(round(scale_bits))
+
+
+def ste_round(x, round_mode=QuantMode.floor_add):
+    if round_mode == QuantMode.floor_add:
+        rounded = torch.floor(x + 0.5)
+    elif round_mode == QuantMode.floor:
+        rounded = torch.floor(x)
+    elif round_mode == QuantMode.ceil:
+        rounded = torch.ceil(x)
     else:
-        x_int = (x_int * pow(2, l_scale) + 0.5).floor().int()
-    return x_int
+        rounded = torch.round(x)
+    return x + (rounded - x).detach()
+
+
+def ste_clamp(x, min_val, max_val):
+    clamped = x.clamp(min=min_val, max=max_val)
+    return x + (clamped - x).detach()
+
+
+def quantize_to_int_ste(x, scale_bits, clamp_min=None, clamp_max=None, round_mode=QuantMode.floor_add):
+    scale = float(2 ** scale_bits)
+    quantized = ste_round(x.double() * scale, round_mode)
+    if clamp_min is not None or clamp_max is not None:
+        quantized = ste_clamp(quantized, clamp_min, clamp_max)
+    return quantized
+
+
+def clamp_to_int32_ste(x):
+    return ste_clamp(x, -(2**31), 2**31 - 1)
+
+
+def clamp_to_bits_ste(x, data_bits):
+    return ste_clamp(x, -(2 ** (data_bits - 1)), 2 ** (data_bits - 1) - 1)
+
+
+class _MatmulIntBiasSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x_int, w_int, b_int):
+        ctx.has_bias = b_int is not None
+        if ctx.has_bias:
+            ctx.save_for_backward(x_int, w_int, b_int)
+        else:
+            ctx.save_for_backward(x_int, w_int)
+
+        x_i64 = x_int.detach().round().to(torch.int64)
+        w_i64 = w_int.detach().round().to(torch.int64)
+        out_i64 = torch.matmul(x_i64.to(torch.float64), w_i64.t().to(torch.float64)).round().to(torch.int64)
+        if ctx.has_bias:
+            out_i64 = out_i64 + b_int.detach().round().to(torch.int64)
+        return out_i64.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.has_bias:
+            x_int, w_int, _ = ctx.saved_tensors
+        else:
+            x_int, w_int = ctx.saved_tensors
+
+        grad_output = grad_output.to(torch.float64)
+        grad_x = torch.matmul(grad_output, w_int.to(torch.float64))
+        grad_w = torch.matmul(grad_output.transpose(0, 1), x_int.to(torch.float64))
+        grad_b = grad_output.sum(dim=0) if ctx.has_bias else None
+        return grad_x, grad_w, grad_b
+
+
+def matmul_int_with_bias_ste(x_int, w_int, b_int):
+    return _MatmulIntBiasSTE.apply(x_int, w_int, b_int)
+
+
+class _RequantIntSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x_int, src_bits, dst_bits):
+        ctx.scale = float(2 ** (dst_bits - src_bits)) if dst_bits >= src_bits else float(2 ** (-(src_bits - dst_bits)))
+        x_i64 = x_int.detach().round().to(torch.int64)
+        if dst_bits >= src_bits:
+            out_i64 = x_i64 << (dst_bits - src_bits)
+        else:
+            shift = src_bits - dst_bits
+            out_i64 = (x_i64.to(torch.float64) * (2.0 ** (-shift)) + 0.5).floor().to(torch.int64)
+        return out_i64.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.to(torch.float64) * ctx.scale, None, None
+
+
+def requant_int_ste(x_int, src_bits, dst_bits):
+    return _RequantIntSTE.apply(x_int, src_bits, dst_bits)
+
+
+class _MulRequantIntSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a_int, b_int, src_bits, dst_bits):
+        ctx.scale = float(2 ** (dst_bits - src_bits)) if dst_bits >= src_bits else float(2 ** (-(src_bits - dst_bits)))
+        ctx.save_for_backward(a_int, b_int)
+
+        a_i64 = a_int.detach().round().to(torch.int64)
+        b_i64 = b_int.detach().round().to(torch.int64)
+        prod_i64 = a_i64 * b_i64
+        if dst_bits >= src_bits:
+            out_i64 = prod_i64 << (dst_bits - src_bits)
+        else:
+            shift = src_bits - dst_bits
+            out_i64 = (prod_i64.to(torch.float64) * (2.0 ** (-shift)) + 0.5).floor().to(torch.int64)
+        return out_i64.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        a_int, b_int = ctx.saved_tensors
+        grad_output = grad_output.to(torch.float64)
+        scale = ctx.scale
+        grad_a = grad_output * b_int.to(torch.float64) * scale
+        grad_b = grad_output * a_int.to(torch.float64) * scale
+        return grad_a, grad_b, None, None
+
+
+def mul_requant_int_ste(a_int, b_int, src_bits, dst_bits):
+    return _MulRequantIntSTE.apply(a_int, b_int, src_bits, dst_bits)
+
+
+def _runtime_activation_kernel(kind):
+    if kind == "sigmoid":
+        if QUANT_CONFIGS.platform == PlatForm.venus:
+            return lingerext.venus_qsigmoid_forward
+        if QUANT_CONFIGS.platform == PlatForm.venusA:
+            return lingerext.venusa_qsigmoid_forward
+        if QUANT_CONFIGS.platform in {PlatForm.arcs, PlatForm.mars}:
+            return lingerext.arcs_qsigmoid_forward
+    elif kind == "tanh":
+        if QUANT_CONFIGS.platform == PlatForm.venus:
+            return lingerext.venus_qtanh_forward
+        if QUANT_CONFIGS.platform == PlatForm.venusA:
+            return lingerext.venusa_qtanh_forward
+        if QUANT_CONFIGS.platform in {PlatForm.arcs, PlatForm.mars}:
+            return lingerext.arcs_qtanh_forward
+    raise ValueError(f"unsupported platform/kind pair: {QUANT_CONFIGS.platform}, {kind}")
+
+
+class _RuntimeActivationSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_int, kind, input_bits, output_bits, clamp_min, clamp_max):
+        ctx.kind = kind
+        ctx.input_bits = input_bits
+        ctx.output_bits = output_bits
+        ctx.save_for_backward(input_int)
+
+        kernel = _runtime_activation_kernel(kind)
+        input_i32 = input_int.detach().round().to(torch.int64).clamp_(clamp_min, clamp_max).to(torch.int32)
+        output = kernel(input_i32.contiguous())
+        if kind == "sigmoid" and QUANT_CONFIGS.platform in RUNTIME_SIGMOID_PLATFORMS:
+            output = sigmoid_requant_to_qbits(output, sigmoid_runtime_qbits(QUANT_CONFIGS.platform), output_bits)
+        elif kind == "tanh" and QUANT_CONFIGS.platform in RUNTIME_TANH_PLATFORMS:
+            output = tanh_requant_to_qbits(output, tanh_runtime_qbits(QUANT_CONFIGS.platform), output_bits)
+        return output.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input_int, = ctx.saved_tensors
+        input_fp = (input_int.detach().to(torch.float64) / float(2 ** ctx.input_bits)).requires_grad_(True)
+        with torch.enable_grad():
+            if ctx.kind == "sigmoid":
+                output_scaled = torch.sigmoid(input_fp) * float(2 ** ctx.output_bits)
+            else:
+                output_scaled = torch.tanh(input_fp) * float(2 ** ctx.output_bits)
+            grad_input_fp = torch.autograd.grad(output_scaled, input_fp, grad_output.to(torch.float64))[0]
+        return grad_input_fp / float(2 ** ctx.input_bits), None, None, None, None, None
+
+
+def runtime_activation_q31_from_q27_ste(input_q27, kind):
+    return _RuntimeActivationSTE.apply(input_q27, kind, 27, 31, -(2**31), 2**31 - 1)
+
+
+def runtime_activation_q15_from_q11_ste(input_q11, kind):
+    return _RuntimeActivationSTE.apply(input_q11, kind, 11, 15, -(2**15), 2**15 - 1)
 
 
 def _select_direction_state(g, state, direction):
     index = torch.tensor([direction], dtype=torch.long)
     index_node = g.op("Constant", value_t=index)
     return g.op("Gather", state, index_node, axis_i=0)
-
-class QLSTMSigmoidFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input):
-        ctx.save_for_backward(input)
-
-        if QUANT_CONFIGS.platform == PlatForm.venus:
-            # 转换为Q11格式的int32
-            i_q11 = (input * (1 << 11) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q11.clamp_(-2**15, 2**15-1)
-            output_q15 = lingerext.venus_qsigmoid_forward(i_q11.contiguous())
-        else:
-            # 转换为Q27格式的int32
-            i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q27.clamp_(-2**31, 2**31-1)
-
-            output_q31 = None
-            if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-                output_q31 = lingerext.arcs_qsigmoid_forward(i_q27.contiguous())
-            elif QUANT_CONFIGS.platform == PlatForm.venusA:
-                output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
-
-            output_q15 = luna_requant(output_q31.int(), 31, 15)
-        output = output_q15.float() / (1 << 15)
-        return output
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, = ctx.saved_tensors
-
-        # 使用标准sigmoid的梯度近似
-        input = input.detach().clone().requires_grad_(True)
-
-        with torch.enable_grad():
-            y = F.sigmoid(input)
-            gradInput = torch.autograd.grad(y, input, grad_output)
-        return gradInput[0]
-
-class QLSTMTanhFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input):
-        ctx.save_for_backward(input)
-
-        if QUANT_CONFIGS.platform == PlatForm.venus:
-            # 转换为Q11格式的int32
-            i_q11 = (input * (1 << 11) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q11.clamp_(-2**15, 2**15-1)
-            output_q15 = lingerext.venus_qtanh_forward(i_q11.contiguous())
-        else:
-            # 转换为Q27格式的int32
-            i_q27 = (input * (1 << 27) + 0.5).floor().to(torch.int32)   # float到int32需要2次舍入，这是第二次
-            i_q27.clamp_(-2**31, 2**31-1)
-
-            output_q31 = None
-            if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-                output_q31 = lingerext.arcs_qtanh_forward(i_q27.contiguous())
-            elif QUANT_CONFIGS.platform == PlatForm.venusA:
-                output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
-
-            output_q15 = luna_requant(output_q31.int(), 31, 15)
-        output = output_q15.float() / (1 << 15)
-        return output
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, = ctx.saved_tensors
-
-        # 使用标准tanh的梯度近似
-        input = input.detach().clone().requires_grad_(True)
-
-        with torch.enable_grad():
-            y = F.tanh(input)
-            gradInput = torch.autograd.grad(y, input, grad_output)
-
-        return gradInput[0]
 
 class QLSTMOnnxFunction(torch.autograd.Function):
     @staticmethod
@@ -198,44 +297,124 @@ class QLSTMOnnxFunction(torch.autograd.Function):
         return lstm, hidden, cell
 
 class QLSTMCell(nn.Module):
-    def forward(self, input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh, training,
-                    input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                    biasih_quantizer, biashh_quantizer, cell_quantizer):
-        # step1 input.mul, hidden.mul, fake_quant to keep same value
-        gi_output = F.linear(input_x, weight_ih, bias_ih)
-        gh_output = F.linear(hidden, weight_hh, bias_hh)
+    def _forward_venus_exact(self, input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh,
+                             input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                             cell_quantizer):
+        active_q_in = 11
+        q_i = scale_to_bits(input_quantizer.scale)
+        q_h = scale_to_bits(hidden_quantizer.scale)
+        q_c = scale_to_bits(cell_quantizer.scale)
+        q_iw = scale_to_bits(weightih_quantizer.scale)
+        q_hw = scale_to_bits(weighthh_quantizer.scale)
+        q_ib = q_i + q_iw
+        q_hb = q_h + q_hw
 
-        scale_gi = input_quantizer.scale * weightih_quantizer.scale
-        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
-        gi_output = biasih_quantizer(gi_output, scale_gi) # fake_quant gi_output
-        gh_output = biashh_quantizer(gh_output, scale_gh)
+        x_int = quantize_to_int_ste(input_x, q_i)
+        hidden_int = quantize_to_int_ste(hidden, q_h)
+        cell_int = quantize_to_int_ste(cx, q_c)
+        w_ih_int = quantize_to_int_ste(weight_ih, q_iw)
+        w_hh_int = quantize_to_int_ste(weight_hh, q_hw)
+        b_ih_int = quantize_to_int_ste(bias_ih, q_ib) if bias_ih is not None else None
+        b_hh_int = quantize_to_int_ste(bias_hh, q_hb) if bias_hh is not None else None
 
-        gates = gi_output + gh_output   # 这一步推理时没有舍入
-        ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
-        ingate      = QLSTMSigmoidFunction.apply(ingate)
-        forgetgate  = QLSTMSigmoidFunction.apply(forgetgate)
-        cellgate    = QLSTMTanhFunction.apply(cellgate)
-        outgate     = QLSTMSigmoidFunction.apply(outgate)
-        # sigmoid和tanh结果均为Q15伪量化之后结果，已经包含舍入操作
+        gi_int = matmul_int_with_bias_ste(x_int, w_ih_int, b_ih_int)
+        gh_int = matmul_int_with_bias_ste(hidden_int, w_hh_int, b_hh_int)
+        if q_ib != active_q_in:
+            gi_int = requant_int_ste(gi_int, q_ib, active_q_in)
+        if q_hb != active_q_in:
+            gh_int = requant_int_ste(gh_int, q_hb, active_q_in)
+        gi_int = clamp_to_int32_ste(gi_int)
+        gh_int = clamp_to_int32_ste(gh_int)
 
-        # fake_quant cx
-        scale_cell_15 = torch.tensor(2**15, dtype=torch.float32)
-        scale_cell_27 = torch.tensor(2**27, dtype=torch.float32)
-        new_cx = cell_quantizer(cx, scale_cell_15)
-        cy1 = new_cx.double() * forgetgate.double()
-        cy2 = ingate.double() * cellgate.double()
-        cy1 = cell_quantizer.quant_round(cy1 * (2**30), QuantMode.floor).clamp(-2**31, 2**31-1) / (2 ** 30)
-        cy2 = cell_quantizer.quant_round(cy2 * (2**30), QuantMode.floor).clamp(-2**31, 2**31-1) / (2 ** 30)
-        # cy1 = ((cy1 * (2**30)).clamp(-2**31, 2**31-1)) / (2**30)
-        # cy2 = ((cy2 * (2**30)).clamp(-2**31, 2**31-1)) / (2**30)
-        cy = cy1 + cy2
-        hy = QLSTMTanhFunction.apply(cy)    #包含一次舍入
-        hy = hy.double() * outgate.double()
-        cy = cell_quantizer(cy, scale_cell_27)   # cy需要2次舍入
-        # cy_q27_fake = (cy * (2**27) + 0.5).floor() / (2**27)   # cy需要2次舍入
-        # cy = cell_quantizer(cy_q27_fake, scale_cell_15)
+        gates_int = clamp_to_int32_ste(gi_int + gh_int)
+        G_i_int, G_f_int, G_c_int, G_o_int = gates_int.chunk(4, 1)
+        G_i_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(G_i_int), "sigmoid")
+        G_f_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(G_f_int), "sigmoid")
+        G_c_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(G_c_int), "tanh")
+        G_o_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(G_o_int), "sigmoid")
 
+        cell_q15 = requant_int_ste(cell_int, q_c, 15) if q_c != 15 else cell_int
+        forget_part_q30 = mul_requant_int_ste(G_f_q15, cell_q15, 30, 30)
+        input_part_q30 = mul_requant_int_ste(G_i_q15, G_c_q15, 30, 30)
+        cell_next_q15 = clamp_to_int32_ste(requant_int_ste(forget_part_q30 + input_part_q30, 30, 15))
+        tanh_cell_q15 = runtime_activation_q15_from_q11_ste(requant_int_ste(cell_next_q15, 15, active_q_in), "tanh")
+
+        cy_int = requant_int_ste(cell_next_q15, 15, q_c) if q_c != 15 else cell_next_q15
+        hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
+        hy_int = clamp_to_bits_ste(requant_int_ste(G_o_q15 * tanh_cell_q15, 30, q_h), hidden_bits)
+        hy = hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
+        cy = cy_int.to(dtype=input_x.dtype) / float(2 ** q_c)
         return hy, cy
+
+    def _forward_exact_runtime(self, input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh,
+                               input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                               cell_quantizer):
+        active_q_in = 27
+        q_i = scale_to_bits(input_quantizer.scale)
+        q_h = scale_to_bits(hidden_quantizer.scale)
+        q_c = scale_to_bits(cell_quantizer.scale)
+        q_iw = scale_to_bits(weightih_quantizer.scale)
+        q_hw = scale_to_bits(weighthh_quantizer.scale)
+        q_ib = q_i + q_iw
+        q_hb = q_h + q_hw
+
+        x_int = quantize_to_int_ste(input_x, q_i)
+        hidden_int = quantize_to_int_ste(hidden, q_h)
+        cell_int = quantize_to_int_ste(cx, q_c)
+        w_ih_int = quantize_to_int_ste(weight_ih, q_iw)
+        w_hh_int = quantize_to_int_ste(weight_hh, q_hw)
+        b_ih_int = quantize_to_int_ste(bias_ih, q_ib) if bias_ih is not None else None
+        b_hh_int = quantize_to_int_ste(bias_hh, q_hb) if bias_hh is not None else None
+
+        gi_int = matmul_int_with_bias_ste(x_int, w_ih_int, b_ih_int)
+        gh_int = matmul_int_with_bias_ste(hidden_int, w_hh_int, b_hh_int)
+        if q_ib != active_q_in:
+            gi_int = requant_int_ste(gi_int, q_ib, active_q_in)
+        if q_hb != active_q_in:
+            gh_int = requant_int_ste(gh_int, q_hb, active_q_in)
+        gi_int = clamp_to_int32_ste(gi_int)
+        gh_int = clamp_to_int32_ste(gh_int)
+
+        gates_int = clamp_to_int32_ste(gi_int + gh_int)
+        G_i_int, G_f_int, G_c_int, G_o_int = gates_int.chunk(4, 1)
+        G_i_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(G_i_int), "sigmoid")
+        G_f_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(G_f_int), "sigmoid")
+        G_c_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(G_c_int), "tanh")
+        G_o_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(G_o_int), "sigmoid")
+
+        G_i_q15 = requant_int_ste(G_i_q31, 31, 15)
+        G_f_q15 = requant_int_ste(G_f_q31, 31, 15)
+        G_c_q15 = requant_int_ste(G_c_q31, 31, 15)
+        G_o_q15 = requant_int_ste(G_o_q31, 31, 15)
+
+        cell_q27 = requant_int_ste(cell_int * G_f_q15 + G_i_q15 * G_c_q15, 30, active_q_in)
+        tanh_cell_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(cell_q27), "tanh")
+        tanh_cell_q15 = requant_int_ste(tanh_cell_q31, 31, 15)
+
+        cy_int = requant_int_ste(cell_q27, active_q_in, q_c)
+        hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
+        hy_int = clamp_to_bits_ste(requant_int_ste(G_o_q15 * tanh_cell_q15, 30, q_h), hidden_bits)
+        hy = hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
+        cy = cy_int.to(dtype=input_x.dtype) / float(2 ** q_c)
+        return hy, cy
+
+    def forward(self, input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh,
+                input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                cell_quantizer):
+        platform = QUANT_CONFIGS.platform
+        if platform == PlatForm.venus:
+            return self._forward_venus_exact(
+                input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh,
+                input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                cell_quantizer,
+            )
+        if platform in {PlatForm.venusA, PlatForm.arcs, PlatForm.mars}:
+            return self._forward_exact_runtime(
+                input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh,
+                input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                cell_quantizer,
+            )
+        raise NotImplementedError(f"QLSTM exact runtime is unsupported on platform {platform}")
         
 @register_qmodule(torch.nn.LSTM)
 class QLSTM(QModuleMixin, nn.LSTM):
@@ -375,6 +554,24 @@ class QLSTM(QModuleMixin, nn.LSTM):
             if self.output_quantizer.qat_method == QatMethod.TQT:
                 return
             self.output_quantizer.running_data.fill_(float(self.hidden_quantizer.running_data))
+
+    @staticmethod
+    def _blend_exact_with_quantizer_grad(exact, quantized):
+        return quantized + (exact - quantized).detach()
+
+    def _quantize_hidden_step(self, hidden, direct):
+        hidden = self.quantize_lstm_hidden(hidden, direct)
+        self.update_output_quantizer_running_data(direct)
+        return hidden
+
+    def _quantize_hidden_step_ste(self, hidden, direct, hidden_quantizer, runtime_hidden_scale):
+        hidden_q = self._quantize_hidden_step(hidden, direct)
+        hidden_quantizer.scale.fill_(runtime_hidden_scale)
+        return self._blend_exact_with_quantizer_grad(hidden, hidden_q)
+
+    def _quantize_output_ste(self, output, direct):
+        output_q = self.quantize_lstm_out(output, direct)
+        return self._blend_exact_with_quantizer_grad(output, output_q)
     
     def forward(self, input, *args, **kwargs):
         hx = kwargs.get("hx", None) if len(args) == 0 else args[0]
@@ -518,6 +715,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
 
     def forward_train(self, input, hx=None):
         orig_input = input
+        use_exact_runtime = QUANT_CONFIGS.platform in RUNTIME_EXACT_PLATFORMS
         if isinstance(orig_input, PackedSequence):
             input, batch_sizes, sorted_indices, unsorted_indices = orig_input
             max_batch_size = batch_sizes[0]
@@ -537,21 +735,32 @@ class QLSTM(QModuleMixin, nn.LSTM):
 
         assert self.num_layers == 1, 'invalid num_layers, now only support num_layers = 1'
 
-        self.quantize_lstm_input(input)
+        input = self.quantize_lstm_input(input)
 
         # init hidden
         if hx is None:
             num_directions = 2 if self.bidirectional else 1
             zeros = torch.zeros(self.num_layers * num_directions, max_batch_size, self.hidden_size, dtype=input.dtype, device=input.device)
             hx = (zeros, zeros)
-            hidden_init_scale = self.input_quantizer.scale if self.training else None
+            if use_exact_runtime:
+                hidden_init_scale = self.hidden_quantizer.scale if float(self.hidden_quantizer.scale) != 1.0 else self.input_quantizer.scale
+                if float(self.cell_quantizer.scale) == 1.0:
+                    self.cell_quantizer.scale.fill_(float(1 << 15))
+            else:
+                hidden_init_scale = self.input_quantizer.scale if self.training else None
             self.quantize_lstm_hidden(hx[0][0], 0, hidden_init_scale)  # init hidden_quantizer
             if self.bidirectional:
-                self.quantize_lstm_hidden(hx[0][1], 1, hidden_init_scale)
+                if use_exact_runtime:
+                    hidden_init_scale_r = self.hidden_reverse_quantizer.scale if float(self.hidden_reverse_quantizer.scale) != 1.0 else self.input_quantizer.scale
+                else:
+                    hidden_init_scale_r = hidden_init_scale
+                self.quantize_lstm_hidden(hx[0][1], 1, hidden_init_scale_r)
         else:
             # Each batch of the hidden state should match the input sequence that
             # the user believes he/she is passing in.
             hx = self.permute_hidden(hx, sorted_indices)
+            if use_exact_runtime and float(self.cell_quantizer.scale) == 1.0:
+                self.cell_quantizer.scale.fill_(float(1 << 15))
             self.quantize_lstm_hidden(hx[0][0], 0, None)
             if self.bidirectional:
                 self.quantize_lstm_hidden(hx[0][1], 1, None)
@@ -637,25 +846,45 @@ class QLSTM(QModuleMixin, nn.LSTM):
         hidden_quantizer    = self.hidden_quantizer if direct == 0 else self.hidden_reverse_quantizer
         weightih_quantizer  = self.weightih_quantizer if direct == 0 else self.weightih_reverse_quantizer
         weighthh_quantizer  = self.weighthh_quantizer if direct == 0 else self.weighthh_reverse_quantizer
-        biasih_quantizer  = self.biasih_quantizer if direct == 0 else self.biasih_reverse_quantizer
-        biashh_quantizer  = self.biashh_quantizer if direct == 0 else self.biashh_reverse_quantizer
-        output_quantizer    = self.output_quantizer if direct == 0 else self.output_reverse_quantizer
+        use_exact_runtime = QUANT_CONFIGS.platform in RUNTIME_EXACT_PLATFORMS
+        exact_runtime_training = use_exact_runtime and self.training
 
         # fake_quant hidden, weight, bias
         weight_ih, weight_hh = self.qweight_ih_hh if direct == 0 else self.qweight_ih_hh_reverse
         bias_ih, bias_hh = self.qbias_ih_hh if direct == 0 else self.qbias_ih_hh_reverse
 
         step_outputs = []
+        runtime_hidden_scale = float(hidden_quantizer.scale) if exact_runtime_training else None
+
+        if exact_runtime_training:
+            def postprocess_state(step_hidden, step_cell):
+                step_hidden = self._quantize_hidden_step_ste(step_hidden, direct, hidden_quantizer, runtime_hidden_scale)
+                return step_hidden, step_cell
+
+            def finalize_output(direction_output, direction_hidden, direction_cell):
+                return self._quantize_output_ste(direction_output, direct), (direction_hidden, direction_cell)
+        elif use_exact_runtime:
+            def postprocess_state(step_hidden, step_cell):
+                return step_hidden, step_cell
+
+            def finalize_output(direction_output, direction_hidden, direction_cell):
+                return direction_output, (direction_hidden, direction_cell)
+        else:
+            def postprocess_state(step_hidden, step_cell):
+                step_hidden = self._quantize_hidden_step(step_hidden, direct)
+                return step_hidden, step_cell
+
+            def finalize_output(direction_output, direction_hidden, direction_cell):
+                return self.quantize_lstm_out(direction_output, direct), (direction_hidden, direction_cell)
 
         if batch_sizes is None:
             # input = input if direct == 0 else torch.cat(input.split(1,0)[::-1]) 
             input = input if direct == 0 else input.flip(0).contiguous()
             for input_x in input:
-                hidden, cell_state = self.qlstm_cell_func(input_x, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
-                                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                                        biasih_quantizer, biashh_quantizer, cell_quantizer)
-                hidden = self.quantize_lstm_hidden(hidden, direct)   #hidden fake_quant
-                self.update_output_quantizer_running_data(direct)
+                hidden, cell_state = self.qlstm_cell_func(input_x, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh,
+                                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                                        cell_quantizer)
+                hidden, cell_state = postprocess_state(hidden, cell_state)
                 step_outputs.append(hidden)
         
             step_outputs = step_outputs[::-1] if direct == 1 else step_outputs
@@ -673,11 +902,10 @@ class QLSTM(QModuleMixin, nn.LSTM):
                     #按batch的帧长排完序，由长到短，较短的帧hidden计算的次数少，直接取低位保留
                     final_hiddens.append(_slice((hidden, cell_state) ,batch_len, last_batch_size))
                     hidden, cell_state = hx_slice(None, (hidden, cell_state), last_batch_size, batch_len)
-                hidden, cell_state = self.qlstm_cell_func(input_i, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
-                                                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                                                        biasih_quantizer, biashh_quantizer, cell_quantizer)
-                hidden = self.quantize_lstm_hidden(hidden, direct)   #hidden fake_quant
-                self.update_output_quantizer_running_data(direct)
+                hidden, cell_state = self.qlstm_cell_func(input_i, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh,
+                                                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                                                        cell_quantizer)
+                hidden, cell_state = postprocess_state(hidden, cell_state)
                 step_outputs.append(hidden)
                 last_batch_size = batch_len
             final_hiddens.append((hidden, cell_state))
@@ -704,20 +932,18 @@ class QLSTM(QModuleMixin, nn.LSTM):
                 if last_batch_size != batch_len:
                     #获取input_hx高位hidden部分与上一帧的hidden进行填充，相当于补0
                     hidden, cell_state = hx_slice(input_hx, (hidden, cell_state), last_batch_size, batch_len)
-                hidden, cell_state = self.qlstm_cell_func(input_i, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
-                                                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                                                        biasih_quantizer, biashh_quantizer, cell_quantizer)
-                hidden = self.quantize_lstm_hidden(hidden, direct)   #hidden fake_quant
-                self.update_output_quantizer_running_data(direct)
+                hidden, cell_state = self.qlstm_cell_func(input_i, hidden, cell_state, weight_ih, weight_hh, bias_ih, bias_hh,
+                                                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
+                                                        cell_quantizer)
+                hidden, cell_state = postprocess_state(hidden, cell_state)
                 step_outputs.append(hidden)
                 last_batch_size = batch_len
             
             step_outputs = step_outputs[::-1] 
             output = torch.cat(step_outputs, 0)
 
-        hidden = self.quantize_lstm_hidden(output, direct)  # keep scale_h equal scale_o
-        output = self.quantize_lstm_out(output, direct)
-        return output, (hidden, cell_state)
+        output, state = finalize_output(output, hidden, cell_state)
+        return output, state
     
 
     def _generate_hiddens(self, hx):

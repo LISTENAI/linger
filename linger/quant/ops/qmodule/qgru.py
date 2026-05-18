@@ -2,7 +2,6 @@ import math
 import copy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import _VF
 
 from .qmodule import QModuleMixin
@@ -10,7 +9,8 @@ from ..qconfig import register_qmodule
 from typing import Optional, Union, Dict, Any
 from torch.nn.utils.rnn import PackedSequence
 
-from ..qtensor import QSigmoidFunction
+from ..qtensor.qsigmoid import RUNTIME_SIGMOID_PLATFORMS, sigmoid_requant_to_qbits, sigmoid_runtime_qbits
+from ..qtensor.qtanh import RUNTIME_TANH_PLATFORMS, tanh_requant_to_qbits, tanh_runtime_qbits
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ....config import QUANT_CONFIGS
@@ -19,96 +19,193 @@ from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 import lingerext
 
-def luna_requant(x_int, scale_x, scale_y):
-    l_scale = scale_y - scale_x
-    
-    if l_scale > 0:
-        x_int = x_int * pow(2, l_scale)
+def scale_to_bits(scale):
+    scale_value = float(scale)
+    scale_bits = math.log2(scale_value)
+    assert abs(scale_bits - round(scale_bits)) < 1e-6, f"scale {scale_value} is not power-of-two"
+    return int(round(scale_bits))
+
+
+def ste_round(x, round_mode=QuantMode.floor_add):
+    if round_mode == QuantMode.floor_add:
+        rounded = torch.floor(x + 0.5)
+    elif round_mode == QuantMode.floor:
+        rounded = torch.floor(x)
+    elif round_mode == QuantMode.ceil:
+        rounded = torch.ceil(x)
     else:
-        x_int = (x_int * pow(2, l_scale) + 0.5).floor().int()
-    return x_int
+        rounded = torch.round(x)
+    return x + (rounded - x).detach()
 
 
-def _round_clamp_to_int(input, scale_bits, min_val, max_val):
-    return (input * (1 << scale_bits) + 0.5).floor().to(torch.int64).clamp_(min_val, max_val).to(torch.int32)
+def ste_clamp(x, min_val, max_val):
+    clamped = x.clamp(min=min_val, max=max_val)
+    return x + (clamped - x).detach()
+
+
+def quantize_to_int_ste(x, scale_bits, clamp_min=None, clamp_max=None, round_mode=QuantMode.floor_add):
+    scale = float(2 ** scale_bits)
+    quantized = ste_round(x.double() * scale, round_mode)
+    if clamp_min is not None or clamp_max is not None:
+        quantized = ste_clamp(quantized, clamp_min, clamp_max)
+    return quantized
+
+
+def clamp_to_int32_ste(x):
+    return ste_clamp(x, -(2**31), 2**31 - 1)
+
+
+def clamp_to_bits_ste(x, data_bits):
+    return ste_clamp(x, -(2 ** (data_bits - 1)), 2 ** (data_bits - 1) - 1)
+
+
+class _MatmulIntBiasSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x_int, w_int, b_int):
+        ctx.has_bias = b_int is not None
+        if ctx.has_bias:
+            ctx.save_for_backward(x_int, w_int, b_int)
+        else:
+            ctx.save_for_backward(x_int, w_int)
+
+        x_i64 = x_int.detach().round().to(torch.int64)
+        w_i64 = w_int.detach().round().to(torch.int64)
+        out_i64 = torch.matmul(x_i64.to(torch.float64), w_i64.t().to(torch.float64)).round().to(torch.int64)
+        if QUANT_CONFIGS.platform == PlatForm.venus:
+            out_i64 == out_i64.detach().round().clamp(-(2**31), 2**31 - 1).to(torch.int32)
+        if ctx.has_bias:
+            out_i64 = out_i64 + b_int.detach().round().to(torch.int64)
+        return out_i64.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.has_bias:
+            x_int, w_int, _ = ctx.saved_tensors
+        else:
+            x_int, w_int = ctx.saved_tensors
+
+        grad_output = grad_output.to(torch.float64)
+        grad_x = torch.matmul(grad_output, w_int.to(torch.float64))
+        grad_w = torch.matmul(grad_output.transpose(0, 1), x_int.to(torch.float64))
+        grad_b = grad_output.sum(dim=0) if ctx.has_bias else None
+        return grad_x, grad_w, grad_b
+
+
+def matmul_int_with_bias_ste(x_int, w_int, b_int):
+    return _MatmulIntBiasSTE.apply(x_int, w_int, b_int)
+
+
+class _RequantIntSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x_int, src_bits, dst_bits):
+        ctx.scale = float(2 ** (dst_bits - src_bits)) if dst_bits >= src_bits else float(2 ** (-(src_bits - dst_bits)))
+        x_i64 = x_int.detach().round().to(torch.int64)
+        if dst_bits >= src_bits:
+            out_i64 = x_i64 << (dst_bits - src_bits)
+        else:
+            shift = src_bits - dst_bits
+            out_i64 = (x_i64.to(torch.float64) * (2.0 ** (-shift)) + 0.5).floor().to(torch.int64)
+        return out_i64.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.to(torch.float64) * ctx.scale, None, None
+
+
+def requant_int_ste(x_int, src_bits, dst_bits):
+    return _RequantIntSTE.apply(x_int, src_bits, dst_bits)
+
+
+class _MulRequantIntSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a_int, b_int, src_bits, dst_bits):
+        ctx.scale = float(2 ** (dst_bits - src_bits)) if dst_bits >= src_bits else float(2 ** (-(src_bits - dst_bits)))
+        ctx.save_for_backward(a_int, b_int)
+
+        a_i64 = a_int.detach().round().to(torch.int64)
+        b_i64 = b_int.detach().round().to(torch.int64)
+        prod_i64 = a_i64 * b_i64
+        if dst_bits >= src_bits:
+            out_i64 = prod_i64 << (dst_bits - src_bits)
+        else:
+            shift = src_bits - dst_bits
+            out_i64 = (prod_i64.to(torch.float64) * (2.0 ** (-shift)) + 0.5).floor().to(torch.int64)
+        return out_i64.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        a_int, b_int = ctx.saved_tensors
+        grad_output = grad_output.to(torch.float64)
+        scale = ctx.scale
+        grad_a = grad_output * b_int.to(torch.float64) * scale
+        grad_b = grad_output * a_int.to(torch.float64) * scale
+        return grad_a, grad_b, None, None
+
+
+def mul_requant_int_ste(a_int, b_int, src_bits, dst_bits):
+    return _MulRequantIntSTE.apply(a_int, b_int, src_bits, dst_bits)
+
+
+def _runtime_activation_kernel(kind):
+    if kind == "sigmoid":
+        if QUANT_CONFIGS.platform == PlatForm.venus:
+            return lingerext.venus_qsigmoid_forward
+        if QUANT_CONFIGS.platform == PlatForm.venusA:
+            return lingerext.venusa_qsigmoid_forward
+        if QUANT_CONFIGS.platform in {PlatForm.arcs, PlatForm.mars}:
+            return lingerext.arcs_qsigmoid_forward
+    elif kind == "tanh":
+        if QUANT_CONFIGS.platform == PlatForm.venus:
+            return lingerext.venus_qtanh_forward
+        if QUANT_CONFIGS.platform == PlatForm.venusA:
+            return lingerext.venusa_qtanh_forward
+        if QUANT_CONFIGS.platform in {PlatForm.arcs, PlatForm.mars}:
+            return lingerext.arcs_qtanh_forward
+    raise ValueError(f"unsupported platform/kind pair: {QUANT_CONFIGS.platform}, {kind}")
+
+
+class _RuntimeActivationSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_int, kind, input_bits, output_bits):
+        ctx.kind = kind
+        ctx.input_bits = input_bits
+        ctx.output_bits = output_bits
+        ctx.save_for_backward(input_int)
+
+        kernel = _runtime_activation_kernel(kind)
+        input_i32 = input_int.detach().round().clamp(-(2**31), 2**31 - 1).to(torch.int32)
+        output = kernel(input_i32.contiguous())
+        if kind == "sigmoid" and QUANT_CONFIGS.platform in RUNTIME_SIGMOID_PLATFORMS:
+            output = sigmoid_requant_to_qbits(output, sigmoid_runtime_qbits(QUANT_CONFIGS.platform), output_bits)
+        elif kind == "tanh" and QUANT_CONFIGS.platform in RUNTIME_TANH_PLATFORMS:
+            output = tanh_requant_to_qbits(output, tanh_runtime_qbits(QUANT_CONFIGS.platform), output_bits)
+        return output.to(torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input_int, = ctx.saved_tensors
+        input_fp = (input_int.detach().to(torch.float64) / float(2 ** ctx.input_bits)).requires_grad_(True)
+        with torch.enable_grad():
+            if ctx.kind == "sigmoid":
+                output_scaled = torch.sigmoid(input_fp) * float(2 ** ctx.output_bits)
+            else:
+                output_scaled = torch.tanh(input_fp) * float(2 ** ctx.output_bits)
+            grad_input_fp = torch.autograd.grad(output_scaled, input_fp, grad_output.to(torch.float64))[0]
+        return grad_input_fp / float(2 ** ctx.input_bits), None, None, None
+
+
+def runtime_activation_q31_from_q27_ste(input_q27, kind):
+    return _RuntimeActivationSTE.apply(input_q27, kind, 27, 31)
+
+
+def runtime_activation_q15_from_q11_ste(input_q11, kind):
+    return _RuntimeActivationSTE.apply(input_q11, kind, 11, 15)
 
 
 def _select_direction_state(g, state, direction):
     index = torch.tensor([direction], dtype=torch.long)
     index_node = g.op("Constant", value_t=index)
     return g.op("Gather", state, index_node, axis_i=0)
-
-class QGRUSigmoidFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input):
-        ctx.save_for_backward(input)
-
-        if QUANT_CONFIGS.platform == PlatForm.venus:
-            # 转换为Q11格式的int32
-            i_q11 = _round_clamp_to_int(input, 11, -2**15, 2**15-1)   # float到int32需要2次舍入，这是第二次
-            output_q15 = lingerext.venus_qsigmoid_forward(i_q11.contiguous())
-        else:
-            # 转换为Q27格式的int32
-            i_q27 = _round_clamp_to_int(input, 27, -2**31, 2**31-1)   # float到int32需要2次舍入，这是第二次
-
-            output_q31 = None
-            if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-                output_q31 = lingerext.arcs_qsigmoid_forward(i_q27.contiguous())
-            elif QUANT_CONFIGS.platform == PlatForm.venusA:
-                output_q31 = lingerext.venusa_qsigmoid_forward(i_q27.contiguous())
-
-            output_q15 = luna_requant(output_q31.int(), 31, 15)
-        output = output_q15.float() / (1 << 15)
-        return output
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, = ctx.saved_tensors
-
-        # 使用标准sigmoid的梯度近似
-        input = input.detach().clone().requires_grad_(True)
-
-        with torch.enable_grad():
-            y = F.sigmoid(input)
-            gradInput = torch.autograd.grad(y, input, grad_output)
-
-        return gradInput[0]
-
-class QGRUTanhFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input):
-        ctx.save_for_backward(input)
-
-        if QUANT_CONFIGS.platform == PlatForm.venus:
-            # 转换为Q11格式的int32
-            i_q11 = _round_clamp_to_int(input, 11, -2**15, 2**15-1)   # float到int32需要2次舍入，这是第二次
-            output_q15 = lingerext.venus_qtanh_forward(i_q11.contiguous())
-        else:
-            # 转换为Q27格式的int32
-            i_q27 = _round_clamp_to_int(input, 27, -2**31, 2**31-1)   # float到int32需要2次舍入，这是第二次
-
-            output_q31 = None
-            if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-                output_q31 = lingerext.arcs_qtanh_forward(i_q27.contiguous())
-            elif QUANT_CONFIGS.platform == PlatForm.venusA:
-                output_q31 = lingerext.venusa_qtanh_forward(i_q27.contiguous())
-
-            output_q15 = luna_requant(output_q31.int(), 31, 15)
-        output = output_q15.float() / (1 << 15)
-        return output
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, = ctx.saved_tensors
-
-        # 使用标准tanh的梯度近似
-        input = input.detach().clone().requires_grad_(True)
-
-        with torch.enable_grad():
-            y = F.tanh(input)
-            gradInput = torch.autograd.grad(y, input, grad_output)
-
-        return gradInput[0]
 
 class QGRUOnnxFunction(torch.autograd.Function):
     @staticmethod
@@ -191,227 +288,159 @@ class QGRUOnnxFunction(torch.autograd.Function):
         return gru, hidden
 
 class QGRUCell(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # None means auto: use the STE-friendly path in training and the exact
-        # runtime-matching path in eval/inference. Bool values remain as an
-        # explicit override for checker/debug scenarios.
-        self.exact_runtime_match = None
+    def _forward_venus_exact(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                             input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer):
+        active_q_in = 11
+        q_i = scale_to_bits(input_quantizer.scale)
+        q_h = scale_to_bits(hidden_quantizer.scale)
+        q_iw = scale_to_bits(weightih_quantizer.scale)
+        q_hw = scale_to_bits(weighthh_quantizer.scale)
+        q_ib = q_i + q_iw
+        q_hb = q_h + q_hw
 
-    def _should_use_exact_runtime_match(self, training):
-        if self.exact_runtime_match is None:
-            return not training
-        return bool(self.exact_runtime_match)
+        x_int = quantize_to_int_ste(input_x, q_i)
+        hidden_int = quantize_to_int_ste(hidden, q_h)
+        w_ih_int = quantize_to_int_ste(weight_ih, q_iw)
+        w_hh_int = quantize_to_int_ste(weight_hh, q_hw)
+        b_ih_int = quantize_to_int_ste(bias_ih, q_ib) if bias_ih is not None else None
+        b_hh_int = quantize_to_int_ste(bias_hh, q_hb) if bias_hh is not None else None
 
-    @staticmethod
-    def _ste_round_to_scale(x, scale_bits, round_mode=QuantMode.floor_add):
-        scale = float(2 ** scale_bits)
-        x_q = AQuantizer.quant_round(None, x.double() * scale, round_mode) / scale
-        return (x_q.to(dtype=x.dtype) - x).detach() + x
-
-    @staticmethod
-    def _scale_to_bits(scale):
-        scale_value = float(scale)
-        scale_bits = math.log2(scale_value)
-        assert abs(scale_bits - round(scale_bits)) < 1e-6, f"scale {scale_value} is not power-of-two"
-        return int(round(scale_bits))
-
-    @staticmethod
-    def _round_to_int_tensor(x, scale_bits, round_mode=QuantMode.floor_add):
-        scale = float(2 ** scale_bits)
-        return AQuantizer.quant_round(None, x.double() * scale, round_mode).to(torch.int64)
-
-    @staticmethod
-    def _matmul_int_with_bias(x_int, w_int, b_int):
-        out = torch.matmul(x_int.double(), w_int.t().double()).round().to(torch.int64)
-        return out + b_int.to(torch.int64)
-
-    @staticmethod
-    def _requant_int_tensor(x_int, src_bits, dst_bits):
-        if dst_bits >= src_bits:
-            return x_int << (dst_bits - src_bits)
-        shift = src_bits - dst_bits
-        return (x_int.double() * (2.0 ** (-shift)) + 0.5).floor().to(torch.int64)
-
-    @staticmethod
-    def _clamp_to_int32_tensor(x_int):
-        return x_int.clamp_(min=-(2**31), max=2**31 - 1).to(torch.int32)
-
-    @staticmethod
-    def _venusa_activation_q31(input_fp, kind):
-        q27 = _round_clamp_to_int(input_fp, 27, -2**31, 2**31 - 1)
-        if kind == "sigmoid":
-            return lingerext.venusa_qsigmoid_forward(q27.contiguous()).to(torch.int64)
-        if kind == "tanh":
-            return lingerext.venusa_qtanh_forward(q27.contiguous()).to(torch.int64)
-        raise ValueError(f"unsupported activation kind: {kind}")
-
-    def _forward_venus(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
-                       input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-                       biasih_quantizer, biashh_quantizer):
-        gi_output = F.linear(input_x, weight_ih, bias_ih)
-        gh_output = F.linear(hidden, weight_hh, bias_hh)
-
-        scale_gi = input_quantizer.scale * weightih_quantizer.scale
-        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
-        gi_output = biasih_quantizer(gi_output, scale_gi)
-        gh_output = biashh_quantizer(gh_output, scale_gh)
-
-        i_r, i_z, i_n = gi_output.chunk(3, 1)
-        h_r, h_z, h_n = gh_output.chunk(3, 1)
-        resetgate = QGRUSigmoidFunction.apply(i_r + h_r)
-        updategate = QGRUSigmoidFunction.apply(i_z + h_z)
-
-        h_n = self._ste_round_to_scale(h_n, 27, QuantMode.floor_add)
-        reset_hidden_n = self._ste_round_to_scale(resetgate.double() * h_n.double(), 15, QuantMode.floor_add)
-        newgate = QGRUTanhFunction.apply(i_n + reset_hidden_n)
-
-        hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
-        hy = newgate + updategate * (hidden_q - newgate)
-        return hy
-
-    def _forward_venusa(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
-                        input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-                        biasih_quantizer, biashh_quantizer, training):
-        gi_output = F.linear(input_x, weight_ih, bias_ih)
-        gh_output = F.linear(hidden, weight_hh, bias_hh)
-
-        scale_gi = input_quantizer.scale * weightih_quantizer.scale
-        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
-        gi_output = biasih_quantizer(gi_output, scale_gi)
-        gh_output = biashh_quantizer(gh_output, scale_gh)
-
-        q_ib = self._scale_to_bits(scale_gi)
-        q_hb = self._scale_to_bits(scale_gh)
-        max_b_q = max(q_ib, q_hb)
-        q_h = self._scale_to_bits(hidden_quantizer.scale)
-
-        i_r, i_z, i_n = gi_output.chunk(3, 1)
-        h_r, h_z, h_n = gh_output.chunk(3, 1)
-        if not self._should_use_exact_runtime_match(training):
-            resetgate = QGRUSigmoidFunction.apply(i_r + h_r)
-            updategate = QGRUSigmoidFunction.apply(i_z + h_z)
-
-            h_n = self._ste_round_to_scale(h_n, 27, QuantMode.floor_add)
-            reset_hidden_n = self._ste_round_to_scale(resetgate.double() * h_n.double(), 15, QuantMode.floor_add)
-            newgate = QGRUTanhFunction.apply(i_n + reset_hidden_n)
-
-            hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
-            hy = newgate + updategate * (hidden_q - newgate)
-            return hy
-
-        q_i = self._scale_to_bits(input_quantizer.scale)
-        q_iw = self._scale_to_bits(weightih_quantizer.scale)
-        q_hw = self._scale_to_bits(weighthh_quantizer.scale)
-
-        x_int = self._round_to_int_tensor(input_x, q_i)
-        hidden_int = self._round_to_int_tensor(hidden, q_h)
-        w_ih_int = self._round_to_int_tensor(weight_ih, q_iw)
-        w_hh_int = self._round_to_int_tensor(weight_hh, q_hw)
-        b_ih_int = self._round_to_int_tensor(bias_ih, q_ib)
-        b_hh_int = self._round_to_int_tensor(bias_hh, q_hb)
-
-        gi_int = self._matmul_int_with_bias(x_int, w_ih_int, b_ih_int)
-        gh_int = self._matmul_int_with_bias(hidden_int, w_hh_int, b_hh_int)
-        if q_ib < max_b_q:
-            gi_int = gi_int << (max_b_q - q_ib)
-        elif q_ib > max_b_q:
-            gi_int = self._requant_int_tensor(gi_int, q_ib, max_b_q)
-        if q_hb < max_b_q:
-            gh_int = gh_int << (max_b_q - q_hb)
-        elif q_hb > max_b_q:
-            gh_int = self._requant_int_tensor(gh_int, q_hb, max_b_q)
+        gi_int = matmul_int_with_bias_ste(x_int, w_ih_int, b_ih_int)
+        gh_int = matmul_int_with_bias_ste(hidden_int, w_hh_int, b_hh_int)
+        if q_ib != active_q_in:
+            gi_int = requant_int_ste(gi_int, q_ib, active_q_in)
+        if q_hb != active_q_in:
+            gh_int = requant_int_ste(gh_int, q_hb, active_q_in)
+        gi_int = clamp_to_int32_ste(gi_int)
+        gh_int = clamp_to_int32_ste(gh_int)
 
         i_r_int, i_z_int, i_n_int = gi_int.chunk(3, 1)
         h_r_int, h_z_int, h_n_int = gh_int.chunk(3, 1)
-        reset_pre_int = self._requant_int_tensor(i_r_int + h_r_int, max_b_q, 27)
-        update_pre_int = self._requant_int_tensor(i_z_int + h_z_int, max_b_q, 27)
-        reset_pre_i32 = self._clamp_to_int32_tensor(reset_pre_int)
-        update_pre_i32 = self._clamp_to_int32_tensor(update_pre_int)
-        resetgate_q31 = lingerext.venusa_qsigmoid_forward(reset_pre_i32.contiguous()).to(torch.int64)
-        updategate_q31 = lingerext.venusa_qsigmoid_forward(update_pre_i32.contiguous()).to(torch.int64)
+        resetgate_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(i_r_int + h_r_int), "sigmoid")
+        updategate_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(i_z_int + h_z_int), "sigmoid")
 
-        reset_hidden_n_int = self._requant_int_tensor(resetgate_q31 * h_n_int, 31 + max_b_q, max_b_q)
-        newgate_pre_int = self._requant_int_tensor(i_n_int + reset_hidden_n_int, max_b_q, 27)
-        newgate_pre_i32 = self._clamp_to_int32_tensor(newgate_pre_int)
-        newgate_q31 = lingerext.venusa_qtanh_forward(newgate_pre_i32.contiguous()).to(torch.int64)
-        newgate_qh_int = self._requant_int_tensor(newgate_q31, 31, q_h)
+        reset_hidden_n_int = mul_requant_int_ste(resetgate_q15, h_n_int, 15 + active_q_in, active_q_in)
+        newgate_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(i_n_int + reset_hidden_n_int), "tanh")
+        newgate_qh_int = requant_int_ste(newgate_q15, 15, q_h)
 
-        update_hidden_int = self._requant_int_tensor(updategate_q31 * (hidden_int - newgate_qh_int), 31 + q_h, q_h)
-        hy_int = newgate_qh_int + update_hidden_int
+        update_hidden_int = mul_requant_int_ste(updategate_q15, (newgate_qh_int - hidden_int).detach().round().clamp(-(2**15), 2**15 - 1), 15 + q_h, q_h)
+        hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
+        hy_int = clamp_to_bits_ste(hidden_int + update_hidden_int, hidden_bits)
         return hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
 
-    def _forward_arcs_mars(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
-                           input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-                           biasih_quantizer, biashh_quantizer, training):
+    def _forward_venusa_exact(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                              input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer):
+        scale_gi = input_quantizer.scale * weightih_quantizer.scale
+        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
+        q_ib = scale_to_bits(scale_gi)
+        q_hb = scale_to_bits(scale_gh)
+        max_b_q = max(q_ib, q_hb)
+        q_h = scale_to_bits(hidden_quantizer.scale)
+        q_i = scale_to_bits(input_quantizer.scale)
+        q_iw = scale_to_bits(weightih_quantizer.scale)
+        q_hw = scale_to_bits(weighthh_quantizer.scale)
+
+        x_int = quantize_to_int_ste(input_x, q_i)
+        hidden_int = quantize_to_int_ste(hidden, q_h)
+        w_ih_int = quantize_to_int_ste(weight_ih, q_iw)
+        w_hh_int = quantize_to_int_ste(weight_hh, q_hw)
+        b_ih_int = quantize_to_int_ste(bias_ih, q_ib) if bias_ih is not None else None
+        b_hh_int = quantize_to_int_ste(bias_hh, q_hb) if bias_hh is not None else None
+
+        gi_int = matmul_int_with_bias_ste(x_int, w_ih_int, b_ih_int)
+        gh_int = matmul_int_with_bias_ste(hidden_int, w_hh_int, b_hh_int)
+        if q_ib != max_b_q:
+            gi_int = requant_int_ste(gi_int, q_ib, max_b_q)
+        if q_hb != max_b_q:
+            gh_int = requant_int_ste(gh_int, q_hb, max_b_q)
+        gi_int = clamp_to_int32_ste(gi_int)
+        gh_int = clamp_to_int32_ste(gh_int)
+
+        i_r_int, i_z_int, i_n_int = gi_int.chunk(3, 1)
+        h_r_int, h_z_int, h_n_int = gh_int.chunk(3, 1)
+        reset_pre_int = clamp_to_int32_ste(requant_int_ste(i_r_int + h_r_int, max_b_q, 27))
+        update_pre_int = clamp_to_int32_ste(requant_int_ste(i_z_int + h_z_int, max_b_q, 27))
+        resetgate_q31 = runtime_activation_q31_from_q27_ste(reset_pre_int, "sigmoid")
+        updategate_q31 = runtime_activation_q31_from_q27_ste(update_pre_int, "sigmoid")
+
+        reset_hidden_n_int = mul_requant_int_ste(resetgate_q31, h_n_int, 31 + max_b_q, max_b_q)
+        newgate_pre_int = clamp_to_int32_ste(requant_int_ste(i_n_int + reset_hidden_n_int, max_b_q, 27))
+        newgate_q31 = runtime_activation_q31_from_q27_ste(newgate_pre_int, "tanh")
+        newgate_qh_int = requant_int_ste(newgate_q31, 31, q_h)
+
+        update_hidden_int = mul_requant_int_ste(updategate_q31, hidden_int - newgate_qh_int, 31 + q_h, q_h)
+        hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
+        hy_int = clamp_to_bits_ste(newgate_qh_int + update_hidden_int, hidden_bits)
+        return hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
+
+    def _forward_arcs_mars_exact(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                                 input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer):
+        active_q_in = 27
         hidden_size = hidden.size(1)
+        q_i = scale_to_bits(input_quantizer.scale)
+        q_h = scale_to_bits(hidden_quantizer.scale)
+        q_iw = scale_to_bits(weightih_quantizer.scale)
+        q_hw = scale_to_bits(weighthh_quantizer.scale)
+        q_ib = q_i + q_iw
+        q_hb = q_h + q_hw
+
+        x_int = quantize_to_int_ste(input_x, q_i)
+        hidden_int = quantize_to_int_ste(hidden, q_h)
+        w_ih_int = quantize_to_int_ste(weight_ih, q_iw)
+
         w_hh_rz, w_hh_n = weight_hh[:hidden_size * 2], weight_hh[hidden_size * 2:]
+        w_hh_rz_int = quantize_to_int_ste(w_hh_rz, q_hw)
+        w_hh_n_int = quantize_to_int_ste(w_hh_n, q_hw)
+        b_ih_int = quantize_to_int_ste(bias_ih, q_ib) if bias_ih is not None else None
         b_hh_rz = bias_hh[:hidden_size * 2] if bias_hh is not None else None
         b_hh_n = bias_hh[hidden_size * 2:] if bias_hh is not None else None
+        b_hh_rz_int = quantize_to_int_ste(b_hh_rz, q_hb) if b_hh_rz is not None else None
+        b_hh_n_int = quantize_to_int_ste(b_hh_n, q_hb) if b_hh_n is not None else None
 
-        gi_output = F.linear(input_x, weight_ih, bias_ih)
-        scale_gi = input_quantizer.scale * weightih_quantizer.scale
-        gi_output = biasih_quantizer(gi_output, scale_gi)
-        i_r, i_z, i_n = gi_output.chunk(3, 1)
+        gi_int = matmul_int_with_bias_ste(x_int, w_ih_int, b_ih_int)
+        if q_ib != active_q_in:
+            gi_int = requant_int_ste(gi_int, q_ib, active_q_in)
+        gi_int = clamp_to_int32_ste(gi_int)
+        i_r_int, i_z_int, i_n_int = gi_int.chunk(3, 1)
 
-        gh_rz = F.linear(hidden, w_hh_rz, b_hh_rz)
-        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
-        gh_rz = biashh_quantizer(gh_rz, scale_gh)
-        h_r, h_z = gh_rz.chunk(2, 1)
+        gh_rz_int = matmul_int_with_bias_ste(hidden_int, w_hh_rz_int, b_hh_rz_int)
+        if q_hb != active_q_in:
+            gh_rz_int = requant_int_ste(gh_rz_int, q_hb, active_q_in)
+        gh_rz_int = clamp_to_int32_ste(gh_rz_int)
+        h_r_int, h_z_int = gh_rz_int.chunk(2, 1)
 
-        q_h = self._scale_to_bits(hidden_quantizer.scale)
-        if not self._should_use_exact_runtime_match(training):
-            resetgate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_r + h_r, 27, QuantMode.floor_add))
-            updategate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_z + h_z, 27, QuantMode.floor_add))
+        resetgate_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(i_r_int + h_r_int), "sigmoid")
+        updategate_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(i_z_int + h_z_int), "sigmoid")
 
-            hidden_q = self._ste_round_to_scale(hidden, 15, QuantMode.floor_add)
-            reset_hidden = self._ste_round_to_scale(resetgate * hidden_q, 7, QuantMode.floor_add)
+        reset_hidden_int = mul_requant_int_ste(resetgate_q31, hidden_int, 31 + q_h, q_h)
+        gh_n_int = matmul_int_with_bias_ste(reset_hidden_int, w_hh_n_int, b_hh_n_int)
+        if q_hb != active_q_in:
+            gh_n_int = requant_int_ste(gh_n_int, q_hb, active_q_in)
+        gh_n_int = clamp_to_int32_ste(gh_n_int)
 
-            gh_n = F.linear(reset_hidden, w_hh_n, b_hh_n)
-            gh_n = biashh_quantizer(gh_n, scale_gh)
-            newgate = QGRUTanhFunction.apply(self._ste_round_to_scale(i_n + gh_n, 27, QuantMode.floor_add))
-            hy = newgate + updategate * (hidden_q - newgate)
-            return hy
+        newgate_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(i_n_int + gh_n_int), "tanh")
+        newgate_qh_int = requant_int_ste(newgate_q31, 31, q_h)
+        update_hidden_int = mul_requant_int_ste(updategate_q31, hidden_int - newgate_qh_int, 31 + q_h, q_h)
+        hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
+        hy_int = clamp_to_bits_ste(newgate_qh_int + update_hidden_int, hidden_bits)
+        return hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
 
-        i_r = self._ste_round_to_scale(i_r, 27, QuantMode.floor_add)
-        i_z = self._ste_round_to_scale(i_z, 27, QuantMode.floor_add)
-        h_r = self._ste_round_to_scale(h_r, 27, QuantMode.floor_add)
-        h_z = self._ste_round_to_scale(h_z, 27, QuantMode.floor_add)
-        resetgate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_r + h_r, 27, QuantMode.floor_add))
-        updategate = QGRUSigmoidFunction.apply(self._ste_round_to_scale(i_z + h_z, 27, QuantMode.floor_add))
-
-        hidden_q = self._ste_round_to_scale(hidden, q_h, QuantMode.floor_add)
-        reset_hidden = self._ste_round_to_scale(resetgate * hidden_q, q_h, QuantMode.floor_add)
-
-        gh_n = F.linear(reset_hidden, w_hh_n, b_hh_n)
-        gh_n = biashh_quantizer(gh_n, scale_gh)
-        i_n = self._ste_round_to_scale(i_n, 27, QuantMode.floor_add)
-        gh_n = self._ste_round_to_scale(gh_n, 27, QuantMode.floor_add)
-        newgate = QGRUTanhFunction.apply(self._ste_round_to_scale(i_n + gh_n, 27, QuantMode.floor_add))
-        newgate_q = self._ste_round_to_scale(newgate, q_h, QuantMode.floor_add)
-        update_hidden = self._ste_round_to_scale(updategate * (hidden_q - newgate_q), q_h, QuantMode.floor_add)
-        hy = newgate_q + update_hidden
-        return hy
-
-    def forward(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, training,
-                    input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                    biasih_quantizer, biashh_quantizer, output_quantizer):
+    def forward(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
+                input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
+                biasih_quantizer, biashh_quantizer):
         if QUANT_CONFIGS.platform == PlatForm.venus:
-            return self._forward_venus(
+            return self._forward_venus_exact(
                 input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                 input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-                biasih_quantizer, biashh_quantizer,
             )
         if QUANT_CONFIGS.platform == PlatForm.venusA:
-            return self._forward_venusa(
+            return self._forward_venusa_exact(
                 input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                 input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-                biasih_quantizer, biashh_quantizer, training,
             )
-        return self._forward_arcs_mars(
+        return self._forward_arcs_mars_exact(
             input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
             input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer,
-            biasih_quantizer, biashh_quantizer, training,
         )
         
 
@@ -547,6 +576,24 @@ class QGRU(QModuleMixin, nn.GRU):
             self.output_reverse_quantizer.running_data.fill_(float(self.hidden_reverse_quantizer.running_data))
         else:
             self.output_quantizer.running_data.fill_(float(self.hidden_quantizer.running_data))
+
+    @staticmethod
+    def _blend_exact_with_quantizer_grad(exact, quantized):
+        return quantized + (exact - quantized).detach()
+
+    def _quantize_hidden_step(self, hidden, direct):
+        hidden = self.quantize_gru_hidden(hidden, direct)
+        self.update_output_quantizer_running_data(direct)
+        return hidden
+
+    def _quantize_hidden_step_ste(self, hidden, direct, hidden_quantizer, runtime_hidden_scale):
+        hidden_q = self._quantize_hidden_step(hidden, direct)
+        hidden_quantizer.scale.fill_(runtime_hidden_scale)
+        return self._blend_exact_with_quantizer_grad(hidden, hidden_q)
+
+    def _quantize_output_ste(self, output, direct):
+        output_q = self.quantize_gru_out(output, direct)
+        return self._blend_exact_with_quantizer_grad(output, output_q)
     
     def forward(self, input, *args, **kwargs):
         hx = kwargs.get("hx", None) if len(args) == 0 else args[0]
@@ -680,6 +727,7 @@ class QGRU(QModuleMixin, nn.GRU):
 
     def forward_train(self, input, hx=None):
         orig_input = input
+        use_exact_runtime = QUANT_CONFIGS.platform in {PlatForm.venus, PlatForm.venusA, PlatForm.arcs, PlatForm.mars}
         if isinstance(orig_input, PackedSequence):
             input, batch_sizes, sorted_indices, unsorted_indices = orig_input
             max_batch_size = batch_sizes[0]
@@ -705,10 +753,17 @@ class QGRU(QModuleMixin, nn.GRU):
         if hx is None:
             num_directions = 2 if self.bidirectional else 1
             hx = torch.zeros(self.num_layers * num_directions, max_batch_size, self.hidden_size, dtype=input.dtype, device=input.device)
-            hidden_init_scale = self.input_quantizer.scale if self.training else None
+            if use_exact_runtime:
+                hidden_init_scale = self.hidden_quantizer.scale if float(self.hidden_quantizer.scale) != 1.0 else self.input_quantizer.scale
+            else:
+                hidden_init_scale = self.input_quantizer.scale if self.training else None
             self.quantize_gru_hidden(hx[0], 0, hidden_init_scale)  # init hidden_quantizer
             if self.bidirectional:
-                self.quantize_gru_hidden(hx[1], 1, hidden_init_scale)
+                if use_exact_runtime:
+                    hidden_init_scale_r = self.hidden_reverse_quantizer.scale if float(self.hidden_reverse_quantizer.scale) != 1.0 else self.input_quantizer.scale
+                else:
+                    hidden_init_scale_r = hidden_init_scale
+                self.quantize_gru_hidden(hx[1], 1, hidden_init_scale_r)
         else:
             # Each batch of the hidden state should match the input sequence that
             # the user believes he/she is passing in.
@@ -790,13 +845,34 @@ class QGRU(QModuleMixin, nn.GRU):
         weighthh_quantizer  = self.weighthh_quantizer if direct == 0 else self.weighthh_reverse_quantizer
         biasih_quantizer  = self.biasih_quantizer if direct == 0 else self.biasih_reverse_quantizer
         biashh_quantizer  = self.biashh_quantizer if direct == 0 else self.biashh_reverse_quantizer
-        output_quantizer    = self.output_quantizer if direct == 0 else self.output_reverse_quantizer
+        use_exact_runtime = QUANT_CONFIGS.platform in {PlatForm.venus, PlatForm.venusA, PlatForm.arcs, PlatForm.mars}
+        exact_runtime_training = use_exact_runtime and self.training
 
         # fake_quant hidden, weight, bias
         weight_ih, weight_hh = self.qweight_ih_hh if direct == 0 else self.qweight_ih_hh_reverse
         bias_ih, bias_hh = self.qbias_ih_hh if direct == 0 else self.qbias_ih_hh_reverse
 
         step_outputs = []
+        runtime_hidden_scale = float(hidden_quantizer.scale) if exact_runtime_training else None
+
+        if exact_runtime_training:
+            def postprocess_hidden(step_hidden):
+                return self._quantize_hidden_step_ste(step_hidden, direct, hidden_quantizer, runtime_hidden_scale)
+
+            def finalize_output(direction_output, direction_hidden):
+                return self._quantize_output_ste(direction_output, direct), direction_hidden
+        elif use_exact_runtime:
+            def postprocess_hidden(step_hidden):
+                return step_hidden
+
+            def finalize_output(direction_output, direction_hidden):
+                return direction_output, direction_hidden
+        else:
+            def postprocess_hidden(step_hidden):
+                return self._quantize_hidden_step(step_hidden, direct)
+
+            def finalize_output(direction_output, direction_hidden):
+                return self.quantize_gru_out(direction_output, direct), direction_hidden
 
         if batch_sizes is None:
             # input =  torch.cat(input.split(1,0)[::-1])  if direct == 1 else input
@@ -804,11 +880,10 @@ class QGRU(QModuleMixin, nn.GRU):
 
             step_outputs = []
             for input_x in input:
-                hidden = self.qgru_cell_func(input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
+                hidden = self.qgru_cell_func(input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                                        biasih_quantizer, biashh_quantizer, output_quantizer)
-                hidden = self.quantize_gru_hidden(hidden, direct)
-                self.update_output_quantizer_running_data(direct)
+                                        biasih_quantizer, biashh_quantizer)
+                hidden = postprocess_hidden(hidden)
                 step_outputs.append(hidden)
             step_outputs = step_outputs[::-1] if direct == 1 else step_outputs
             output = torch.stack(step_outputs, 0)
@@ -824,11 +899,10 @@ class QGRU(QModuleMixin, nn.GRU):
                     #按batch的帧长排完序，由长到短，较短的帧hidden计算的次数少，直接取低位保留
                     final_hiddens.append(_slice(hidden, batch_len, last_batch_size))
                     hidden = hx_slice(None, hidden, last_batch_size, batch_len)
-                hidden = self.qgru_cell_func(input_i, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
+                hidden = self.qgru_cell_func(input_i, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                                        biasih_quantizer, biashh_quantizer, output_quantizer)
-                hidden = self.quantize_gru_hidden(hidden, direct)
-                self.update_output_quantizer_running_data(direct)
+                                        biasih_quantizer, biashh_quantizer)
+                hidden = postprocess_hidden(hidden)
                 step_outputs.append(hidden)
                 last_batch_size = batch_len
 
@@ -851,19 +925,17 @@ class QGRU(QModuleMixin, nn.GRU):
                 if last_batch_size != batch_len:
                     #获取input_hx高位hidden部分与上一帧的hidden进行填充，相当于补0
                     hidden = hx_slice(input_hx, hidden, last_batch_size, batch_len)           
-                hidden = self.qgru_cell_func(input_i, hidden, weight_ih, weight_hh, bias_ih, bias_hh, self.training,
+                hidden = self.qgru_cell_func(input_i, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                                         input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer, 
-                                        biasih_quantizer, biashh_quantizer, output_quantizer)
-                hidden = self.quantize_gru_hidden(hidden, direct)
-                self.update_output_quantizer_running_data(direct)
+                                        biasih_quantizer, biashh_quantizer)
+                hidden = postprocess_hidden(hidden)
                 step_outputs.append(hidden)
                 last_batch_size = batch_len
             
             step_outputs = step_outputs[::-1]
             output = torch.cat(step_outputs, 0)
 
-        hidden = self.quantize_gru_hidden(hidden, direct)
-        output = self.quantize_gru_out(output, direct)
+        output, hidden = finalize_output(output, hidden)
         return output, hidden
     
     def _generate_hiddens(self, hx):

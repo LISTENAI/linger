@@ -8,7 +8,7 @@ import numpy as np
 import linger
 from linger.utils import quant, dequant
 from .utils import create_qmodule, create_qmodule_tensor, load_quantized_weights, StringToQuantMode, canonicalize_attrs
-from .utils import create_rnn_module, load_rnn_quantized_weights
+from .utils import create_rnn_module, load_rnn_quantized_weights, load_binary_quantized_weights
 
 @register_op(op_type=['QAvgPool2d', 'AvgPool2dInt'])
 def avgpool2dint(inputs, kwargs):
@@ -142,7 +142,7 @@ def iqcat(inputs, kwargs):
 @register_op(op_type="Gather")
 def gather(inputs, kwargs):
     axis = kwargs.get('axis',0)
-    scale_o = kwargs.get("scale_o", None)
+    scale_o = kwargs.get("scale_o", kwargs.get("scale_w"))
     
     if not isinstance(inputs[0], torch.Tensor):
         inputs[0] = torch.tensor(inputs[0]) if not isinstance(inputs[0], np.ndarray) else torch.from_numpy(inputs[0].copy())
@@ -259,6 +259,8 @@ def iqadd(inputs, kwargs):
     kwargs = canonicalize_attrs(kwargs)
 
     instance = create_qmodule_tensor(QAdd, None, 2, kwargs)
+    if input_0.dtype != torch.float32 or input_1.dtype != torch.float32:
+        input_0, input_1 = load_binary_quantized_weights(instance, kwargs, input_0, input_1)
     return instance(input_0, input_1)
 
 # @register_op(op_type='iqDiv')
@@ -274,22 +276,25 @@ def iqmul(inputs, kwargs):
     x, y = inputs
     kwargs = canonicalize_attrs(kwargs)
 
-    scale_x = kwargs.get('scale_x')
-    scale_y = kwargs.get('scale_y')
+    # scale_x = kwargs.get('scale_x')
+    # scale_y = kwargs.get('scale_y')
 
-    if isinstance(x, QTensor) and isinstance(y, QTensor):
-        qx, qy = x, y
-    elif isinstance(x, QTensor) and (not isinstance(y, QTensor)):
-        qx = x
-        qy = dequant(y, scale_y)
-    elif (not isinstance(x, QTensor)) and isinstance(y, QTensor):
-        qx = dequant(x, scale_x)
-        qy = y
-    else:
-        qx = dequant(x, scale_x)
-        qy = dequant(y, scale_y)
+    # if isinstance(x, QTensor) and isinstance(y, QTensor):
+    #     qx, qy = x, y
+    # elif isinstance(x, QTensor) and (not isinstance(y, QTensor)):
+    #     qx = x
+    #     qy = dequant(y, scale_y)
+    # elif (not isinstance(x, QTensor)) and isinstance(y, QTensor):
+    #     qx = dequant(x, scale_x)
+    #     qy = y
+    # else:
+    #     qx = dequant(x, scale_x)
+    #     qy = dequant(y, scale_y)
 
     instance = create_qmodule_tensor(QMul, None, 2, kwargs)
+    qx, qy = x, y
+    if x.dtype != torch.float32 or y.dtype != torch.float32:
+        qx, qy = load_binary_quantized_weights(instance, kwargs, x, y)
     res = instance(qx, qy)
     
     return res
@@ -420,6 +425,22 @@ def batchnorm2dInt(inputs, kwargs):
 
     return instance(input)
 
+@register_op(op_type=['QBatchNorm1d', 'BatchNorm1dInt'])
+def batchnorm1dInt(inputs, kwargs):
+    input, weights, bias = inputs
+    kwargs = canonicalize_attrs(kwargs)
+
+    num_features = input.shape[1]
+    device = input.device
+
+    module = nn.BatchNorm1d(num_features)
+
+    instance = create_qmodule(QBatchNorm1d, module, device, kwargs)
+    if weights.dtype != torch.float32:
+        instance = load_quantized_weights(instance, kwargs, weights, bias)
+
+    return instance(input)
+
 @register_op(op_type=["GRUInt", "QGRU"])
 def gruint(inputs, kwargs):
     inputs_len = len(inputs)
@@ -495,6 +516,7 @@ def lstmint(inputs, kwargs):
     
     instance = create_rnn_module(QLSTM, module, device, kwargs)
     instance = load_rnn_quantized_weights(instance, kwargs, weight_ih, weight_hh, bias_ih, bias_hh)
+    instance.eval()
 
     if kwargs['go_forward'] == 1:
         res = instance(unpacked_input, hc)

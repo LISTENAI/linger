@@ -126,7 +126,37 @@ static const int32_t calc_sqrt_reciprocal(const int64_t data, int32_t q_x, int32
 	int64_t temp;
 	int q1;
 
-	if (data & 0xC00000000000)
+	if (data & 0xC00000000000000)
+	{
+		temp = data>>50;
+		q1 = 30;
+	}
+	else if (data & 0x300000000000000)
+	{
+		temp = data>>48;
+		q1 = 29;
+	}
+	else if (data & 0xC0000000000000)
+	{
+		temp = data>>46;
+		q1 = 28;
+	}
+	else if (data & 0x30000000000000)
+	{
+		temp = data>>44;
+		q1 = 27;
+	}
+	else if (data & 0xC000000000000)
+	{
+		temp = data>>42;
+		q1 = 26;
+	}
+	else if (data & 0x3000000000000)
+	{
+		temp = data>>40;
+		q1 = 25;
+	}
+	else if (data & 0xC00000000000)
 	{
 		temp = data>>38;
 		q1 = 24;

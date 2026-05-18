@@ -67,8 +67,7 @@ class QGLU(QModuleMixin, nn.GLU):
             return F.glu(input, self.dim)
         else:
             input_a, input_b = torch.chunk(input, 2, dim=self.dim)
-            input_b = QSigmoidFunction.apply(input_b, self.input_quantizer) # int32 dequant
+            input_b = QSigmoidFunction.apply(input_b, self.input_quantizer, None) # int32 dequant
             input_b = self.sigmoid_quantizer(input_b, torch.tensor(2**15, dtype=torch.float32))   # Q15 for thinker forward
             output = input_a * input_b
             return output
-

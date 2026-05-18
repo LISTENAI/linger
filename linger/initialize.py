@@ -85,6 +85,13 @@ def quant_module(module: nn.Module, c_activation_val: float = 8.0, c_weight_val:
             m.output_quantizer.data_bits = out_bits
             m.output_quantizer.clamp_activation_value = c_activation_val
 
+def _match_part(name: str, mix_parts: list):
+    """返回 name 命中的第一个 part，未命中返回 None"""
+    for part in mix_parts:
+        if any(name == p or name.startswith(p + '.') for p in part['name']):
+            return part
+    return None
+
 def constrain(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
     c_configs = QUANT_CONFIGS
     if config_file is not None:
@@ -97,9 +104,11 @@ def constrain(model: nn.Module, config_file: str = None, disable_module=None, di
                 _CMODULE_TABLE.pop(name)
 
     for name, m in model.named_modules():
-        if any(name.startswith(p) for p in disabled_submodels): # disable_submodel 直接按照module的名称进行屏蔽
+        if any(name == p or name.startswith(p + '.') for p in disabled_submodels): # disable_submodel 直接按照module的名称进行屏蔽
             continue
-        _constrain_submodule(model, name, m, c_configs.clamp_info.to_dict())
+        matched_part = _match_part(name, c_configs.mix_parts)
+        constrain_cfg = {**c_configs.clamp_info.to_dict(), **matched_part['clamp_info'].to_dict()} if matched_part is not None else c_configs.clamp_info.to_dict()
+        _constrain_submodule(model, name, m, constrain_cfg)
 
     model.to(c_configs.device)
     return model
@@ -120,13 +129,27 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
     # model = _replace_ops(traced_model, q_configs)
 
     for name, m in model.named_modules():
-        if any(name.startswith(p) for p in disabled_submodels): # disable_submodel 直接按照module的名称进行量化屏蔽
+        if any(name == p or name.startswith(p + '.') for p in disabled_submodels): # disable_submodel 直接按照module的名称进行量化屏蔽
             continue
-        
+
         m.register_forward_pre_hook(hook_pre_forward)
         m.register_forward_hook(hook_forward)
 
-        is_replaced = _quantize_submodule(model, name, m, weights_cfg=q_configs.quant_info.to_dict(), activations_cfg=q_configs.quant_info.to_dict(), bias_cfg=q_configs.quant_info.to_dict(), constrain =  q_configs.clamp_info.to_dict())
+        # 检查当前 module 是否命中某个 mix_parts 配置
+        matched_part = _match_part(name, q_configs.mix_parts)
+
+        if matched_part is not None:
+            weights_cfg     = {**q_configs.quant_info.to_dict(), **matched_part['quant_info'].to_dict()}
+            activations_cfg = weights_cfg
+            bias_cfg        = weights_cfg
+            constrain_cfg   = {**q_configs.clamp_info.to_dict(), **matched_part['clamp_info'].to_dict()}
+        else:
+            weights_cfg     = q_configs.quant_info.to_dict()
+            activations_cfg = q_configs.quant_info.to_dict()
+            bias_cfg        = q_configs.quant_info.to_dict()
+            constrain_cfg   = q_configs.clamp_info.to_dict()
+
+        is_replaced = _quantize_submodule(model, name, m, weights_cfg=weights_cfg, activations_cfg=activations_cfg, bias_cfg=bias_cfg, constrain=constrain_cfg)
         if is_replaced:
             disabled_submodels.append(name)
 
@@ -218,6 +241,20 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
         quant_tensor_layer = None
 
     model._register_load_state_dict_pre_hook(quant_tensor_pre_hook)
+
+    # 若需分别设置input_bits和output_bits，则需要“重新遍历”所有module将对应的input_quantizer和output_quantizer的data_bits进行修改。
+    # 否则通过activate_bits同时对输入和输出bits进行修改，无需再重复遍历，当模型结构复杂时“重新遍历”会稍慢。   
+    if any(p.get('input_bits') is not None or p.get('output_bits') is not None for p in q_configs.mix_parts):
+        for name, m in model.named_modules():
+            matched_part = _match_part(name, q_configs.mix_parts)
+            if matched_part is None:
+                continue
+            input_bits = matched_part.get('input_bits')
+            output_bits = matched_part.get('output_bits')
+            if input_bits is not None and hasattr(m, 'input_quantizer') and m.input_quantizer is not None:
+                m.input_quantizer.data_bits = input_bits
+            if output_bits is not None and hasattr(m, 'output_quantizer') and m.output_quantizer is not None:
+                m.output_quantizer.data_bits = output_bits
 
     model.to(q_configs.device)
     return model

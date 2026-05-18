@@ -22,6 +22,26 @@ MODE_TABLE = {
     "round": QuantMode.round,
     "ceil": QuantMode.ceil,
 }
+LAYERNORM_NORMAL_SCALE = 2 ** 15
+
+
+def _is_qlayernorm(obj):
+    name = obj if isinstance(obj, str) else getattr(obj, "__name__", obj.__class__.__name__)
+    return name == "QLayerNorm"
+
+
+def _get_layernorm_normal_scale(attrs):
+    return attrs.get("scale_y_normal", attrs.get("scale_y_norm", LAYERNORM_NORMAL_SCALE))
+
+
+def _get_bias_scale(qmodule, attrs, scale_x, scale_w):
+    if scale_w is None:
+        return None
+    if _is_qlayernorm(qmodule):
+        return _get_layernorm_normal_scale(attrs) * scale_w
+    if scale_x is None:
+        return None
+    return scale_x * scale_w
 
 def StringToQuantMode(mode: str):
     try:
@@ -50,10 +70,7 @@ def create_qmodule(q_cls: QModuleMixin, torch_module: nn.Module, device: torch.d
         hasattr(torch_module, "bias")
         and torch_module.bias is not None
     )
-    if has_bias and scale_x is not None and scale_w is not None:
-        scale_b = scale_x * scale_w
-    else:
-        scale_b = None
+    scale_b = _get_bias_scale(q_cls, attrs, scale_x, scale_w) if has_bias else None
 
     if scale_x is not None:
         instance.input_quantizer.round_mode = quant_mode
@@ -206,9 +223,7 @@ def create_qmodule_tensor(q_cls: QModuleTensor, module: nn.Module, num_input: in
 def load_quantized_weights(q_instance, attrs, weights = None, bias = None):
     scale_x = attrs.get('scale_x', None)
     scale_w = attrs.get('scale_w', None)
-    scale_b = None
-    if scale_x is not None and scale_w is not None:
-        scale_b = scale_x * scale_w
+    scale_b = _get_bias_scale(q_instance, attrs, scale_x, scale_w)
     
     if weights is not None and scale_w is not None:
         w_data = dequant(weights, scale_w)
@@ -219,6 +234,20 @@ def load_quantized_weights(q_instance, attrs, weights = None, bias = None):
         q_instance.bias = nn.Parameter(b_data, requires_grad=False)
         
     return q_instance
+
+def load_binary_quantized_weights(q_instance, attrs, input_0, input_1):
+    scale_x = attrs.get('scale_x', None)
+    scale_y = attrs.get('scale_y', None)
+    
+    dequant_input0 = input_0
+    if input_0.dtype != torch.float32 and scale_x is not None:
+        dequant_input0 = dequant(input_0, scale_x)
+        
+    dequant_input1 = input_1
+    if input_1.dtype != torch.float32 and scale_y is not None:
+        dequant_input1 = dequant(input_1, scale_y)
+        
+    return dequant_input0, dequant_input1
 
 def load_rnn_quantized_weights(q_instance, attrs, weight_ih, weight_hh, bias_ih, bias_hh):
     scale_x = attrs.get('scale_x', None)
