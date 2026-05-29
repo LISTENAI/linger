@@ -93,15 +93,15 @@ class QSigmoidFunction(torch.autograd.Function):
             # 转换为Q27格式的int32
             l_scale = 27 - int(math.log2(scale_x.data))
             if l_scale > 0:
-                x_q27 = (quant_x * pow(2, l_scale)).to(torch.int32)
+                x_q27 = (quant_x * pow(2, l_scale)).to(torch.int64)
             else:
-                x_q27 = (quant_x * pow(2, l_scale) + 0.5).floor().to(torch.int32)
+                x_q27 = (quant_x * pow(2, l_scale) + 0.5).floor().to(torch.int64)
             x_q27.clamp_(-2**31, 2**31-1)
 
             if QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-                runtime_output = lingerext.arcs_qsigmoid_forward(x_q27.contiguous())
+                runtime_output = lingerext.arcs_qsigmoid_forward(x_q27.contiguous().int())
             elif QUANT_CONFIGS.platform == PlatForm.venusA:
-                runtime_output = lingerext.venusa_qsigmoid_forward(x_q27.contiguous())
+                runtime_output = lingerext.venusa_qsigmoid_forward(x_q27.contiguous().int())
             else:
                 raise RuntimeError(f"QSigmoid does not support platform {QUANT_CONFIGS.platform}")
 

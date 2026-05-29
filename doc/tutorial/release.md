@@ -24,3 +24,6 @@
 # V3.0.8  2026.05.18
 * 优化导图代码，增加小算子常量转换功能；
 * 解决venus平台gru算子一致性问题；
+# V3.0.9  2026.05.29
+* 新增relu6，QGlobalAveragePool2d算子；
+* 优化tvalidator相关代码；

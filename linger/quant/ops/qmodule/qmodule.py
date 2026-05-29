@@ -174,6 +174,8 @@ class QModuleMixin(ABC):
             s = nn.MaxPool2d.extra_repr(self)
         elif 'AvgPool1d' in self._get_name():
             s = nn.AvgPool1d.extra_repr(self)
+        elif 'AdaptiveAvgPool2d' in self._get_name():
+            s = nn.AdaptiveAvgPool2d.extra_repr(self)
         elif 'AvgPool2d' in self._get_name():
             s = nn.AvgPool2d.extra_repr(self)
         elif 'ConvTranspose1d' in self._get_name():
@@ -186,6 +188,8 @@ class QModuleMixin(ABC):
             s = nn.BatchNorm2d.extra_repr(self)
         elif 'Linear' in self._get_name():
             s = nn.Linear.extra_repr(self)
+        elif 'Relu6' in self._get_name():
+            s = nn.ReLU6.extra_repr(self)
         elif 'Relu' in self._get_name():
             s = nn.ReLU.extra_repr(self)
         elif 'GLU' in self._get_name():
@@ -222,4 +226,3 @@ class QModuleMixin(ABC):
             main_str += extra_lines[0]
         main_str += ')'
         return main_str
-

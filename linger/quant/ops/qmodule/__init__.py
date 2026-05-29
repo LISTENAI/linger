@@ -6,6 +6,7 @@ from .qmaxpool1d import *
 from .qmaxpool2d import *
 from .qavgpool1d import *
 from .qavgpool2d import *
+from .qadaptiveavgpool2d import *
 from .qconvtranspose1d import *
 from .qconvtranspose2d import *
 from .qconvtransposebn1d import *
@@ -15,6 +16,7 @@ from .qconvbn2d import *
 from .qbatchnorm1d import *
 from .qbatchnorm2d import *
 from .qrelu import *
+from .qrelu6 import *
 from .qembedding import *
 from .qlayernorm import *
 from .qglu import *

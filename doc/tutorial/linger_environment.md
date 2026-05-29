@@ -39,7 +39,7 @@ nvidia-smi
 
 示例输出：
 
-![NVIDIA_INFO](images/nvidia_info.png)
+![NVIDIA_INFO](/doc/image/nvidia_info.png)
 
 注意事项：
 
@@ -58,7 +58,7 @@ nvidia-smi
 
    如果未安装 CUDA Toolkit，将显示类似以下信息：
 
-   ![NVCC](images/nvcc_none.png)
+   ![NVCC](/doc/image/nvcc_none.png)
 
 2. 安装 CUDA 和 cuDNN：
 
@@ -81,7 +81,7 @@ nvidia-smi
 
    - GCC 版本需与 CUDA 版本匹配，可参考下图选择：
 
-     ![cuda_gcc](images/cuda_gcc.png)
+     ![cuda_gcc](/doc/image/cuda_gcc.png)
 
    - CMake 推荐使用 4.2.1 或更高版本。
    - 推荐安装 Anaconda 或 Miniconda，并为项目创建独立环境。

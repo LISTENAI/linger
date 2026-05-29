@@ -183,8 +183,9 @@ def create_qmodule_tensor(q_cls: QModuleTensor, module: nn.Module, num_input: in
         for i in range(num_input):
             scale = attrs.get(f'scale_x_{i}', 1.0)
             zp = attrs.get(f'input_zero_point_{i}', 0)
+            in_bits = attrs.get(f"x_{i}_bits", 8)
             
-            instance.input_quantizer[i].data_bits = o_bits
+            instance.input_quantizer[i].data_bits = in_bits
             instance.input_quantizer[i].round_mode = quant_mode
             instance.input_quantizer[i].scale = torch.tensor(scale, dtype=torch.float32)
             instance.input_quantizer[i].training = False
@@ -195,12 +196,14 @@ def create_qmodule_tensor(q_cls: QModuleTensor, module: nn.Module, num_input: in
             scale_y = attrs.get('scale_y', 1.0)
             zp_y = attrs.get("input_y_zeropoint", 0)
 
-            instance.input_quantizer[0].data_bits = o_bits
+            y_bits = attrs.get('y_bits', 8)
+
+            instance.input_quantizer[0].data_bits = data_bits
             instance.input_quantizer[0].round_mode = quant_mode
             instance.input_quantizer[0].scale = torch.tensor(scale_x, dtype=torch.float32)
             instance.input_quantizer[0].training = False
 
-            instance.input_quantizer[1].data_bits = o_bits
+            instance.input_quantizer[1].data_bits = y_bits
             instance.input_quantizer[1].round_mode = quant_mode
             instance.input_quantizer[1].scale = torch.tensor(scale_y, dtype=torch.float32)
             instance.input_quantizer[1].training = False

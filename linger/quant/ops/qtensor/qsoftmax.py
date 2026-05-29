@@ -53,16 +53,16 @@ class QSoftmaxFunction(torch.autograd.Function):
         x_2d = x.reshape(outer, size)
         
         # 转换为Q25格式的int32
-        x_q25 = (x_2d * (1 << 25) + 0.5).floor().to(torch.int32)
+        x_q25 = (x_2d * (1 << 25) + 0.5).floor().to(torch.int64)
         x_q25.clamp_(-2**31, 2**31-1)
 
         output_q15 = None
         if QUANT_CONFIGS.platform == PlatForm.venus:
-            output_q15 = lingerext.venus_qsoftmax_forward(x_q25, dim)
+            output_q15 = lingerext.venus_qsoftmax_forward(x_q25.contiguous().int(), dim)
         elif QUANT_CONFIGS.platform == PlatForm.arcs or QUANT_CONFIGS.platform == PlatForm.mars:
-            output_q15 = lingerext.arcs_qsoftmax_forward(x_q25, dim)
+            output_q15 = lingerext.arcs_qsoftmax_forward(x_q25.contiguous().int(), dim)
         elif QUANT_CONFIGS.platform == PlatForm.venusA:
-            output_q15 = lingerext.venusa_qsoftmax_forward(x_q25, dim)
+            output_q15 = lingerext.venusa_qsoftmax_forward(x_q25.contiguous().int(), dim)
         
         # 转换为浮点数 (Q15 -> float)
         y = output_q15.float() / (1 << 15)

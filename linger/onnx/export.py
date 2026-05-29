@@ -39,6 +39,7 @@ STANDARD_QUANT_PASSTHROUGH_OPS = {
     "Expand",
     "Tile",
     "Relu",
+    "Clip",
 }
 STANDARD_QUANT_INPUT_OPS = STANDARD_QUANT_PASSTHROUGH_OPS | {
     "Split",
@@ -158,9 +159,10 @@ def _get_direct_quant_spec_for_input(node, input_index):
     if 'QGRU' in node.op_type or 'QLSTM' in node.op_type:
         has_hidden = bool(_get_attr_value(node, "has_hidden", "has_hidden_i") or 0)
         has_cell = bool(_get_attr_value(node, "has_cell", "has_cell_i") or 0)
-        state_input_count = 1 if has_hidden else 0
-        if 'QLSTM' in node.op_type and has_cell:
-            state_input_count += 1
+        if 'QLSTM' in node.op_type:
+            state_input_count = 2 if has_hidden and has_cell else 0
+        else:
+            state_input_count = 1 if has_hidden else 0
         weight_ih_index = 1 + state_input_count
         weight_hh_index = weight_ih_index + 1
         bias_ih_index = weight_hh_index + 1
@@ -168,6 +170,7 @@ def _get_direct_quant_spec_for_input(node, input_index):
 
         scale_i = _get_attr_value(node, 'scale_x', 'scale_x_f')
         scale_h = _get_attr_value(node, 'scale_h', 'scale_h_f')
+        scale_c = _get_attr_value(node, 'scale_c', 'scale_c_f')
         scale_iw = _get_attr_value(node, 'scale_iw', 'scale_iw_f')
         scale_hw = _get_attr_value(node, 'scale_hw', 'scale_hw_f')
         x_bits = _get_attr_value(node, 'x_bits', 'x_bits_i')
@@ -176,6 +179,10 @@ def _get_direct_quant_spec_for_input(node, input_index):
         w_bits = 8 if w_bits is None else int(w_bits)
         if input_index == 0 and scale_i is not None:
             return {"scale": scale_i, "bits": x_bits, "quant_mode": quant_mode}
+        if 'QLSTM' in node.op_type and has_hidden and input_index == 1 and scale_h is not None:
+            return {"scale": scale_h, "bits": x_bits, "quant_mode": QuantMode.round}
+        if 'QLSTM' in node.op_type and has_hidden and has_cell and input_index == 2 and scale_c is not None:
+            return {"scale": scale_c, "bits": 32, "quant_mode": QuantMode.round}
         if input_index == weight_ih_index and scale_iw is not None:
             return {"scale": scale_iw, "bits": w_bits, "quant_mode": QuantMode.round}
         if input_index == weight_hh_index and scale_hw is not None:
@@ -242,7 +249,7 @@ def _get_quant_node_input_spec(node, input_index):
 
 
 def _get_passthrough_outputs(node, input_index):
-    if node.op_type in {"Identity", "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Flatten", "Slice", "Pad", "Gather"}:
+    if node.op_type in {"Identity", "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Flatten", "Slice", "Pad", "Gather", "Clip"}:
         return list(node.output) if input_index == 0 else []
     if node.op_type in {"Expand", "Tile"}:
         return list(node.output) if input_index == 0 else []
@@ -1108,6 +1115,10 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict['pads_i'] = cls.padding * 2
         qparam_dict['strides_i'] = cls.stride
         qparam_dict['group_i'] = cls.groups
+    elif 'AdaptiveAvgPool2d' in qparam_dict['op_type']:
+        if tuple(_pair(cls.output_size)) != (1, 1):
+            raise NotImplementedError("QAdaptiveAvgPool2d ONNX export only supports output_size=(1, 1)")
+        qparam_dict['op_type'] = 'QGlobalAveragePool2d'
     elif 'AvgPool' in qparam_dict['op_type']:
         tuple_fn = _single if '1d' in qparam_dict['op_type'] else _pair
         qparam_dict['kernel_shape_i'] = tuple_fn(cls.kernel_size)
@@ -1124,6 +1135,7 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict['batch_first_i'] = int(cls.batch_first)
         qparam_dict['go_forward_i'] = True
         qparam_dict['scale_h_f'] = float(cls.hidden_quantizer.scale)
+        qparam_dict['scale_c_f'] = float(cls.cell_quantizer.scale)
         qparam_dict['w_bits_i'] = int(cls.weightih_quantizer.data_bits)
         qparam_dict['scale_iw_f'] = float(cls.weightih_quantizer.scale)
         qparam_dict['scale_hw_f'] = float(cls.weighthh_quantizer.scale)
@@ -1138,6 +1150,7 @@ def generate_onnx_qparam_dict(cls, input_list = False):
             qparam_dict_r['batch_first_i'] = int(cls.batch_first)
             qparam_dict_r['go_forward_i'] = False
             qparam_dict_r['scale_h_f'] = float(cls.hidden_reverse_quantizer.scale)
+            qparam_dict_r['scale_c_f'] = float(cls.cell_quantizer.scale)
             qparam_dict_r['w_bits_i'] = int(cls.weightih_reverse_quantizer.data_bits)
             qparam_dict_r['scale_iw_f'] = float(cls.weightih_reverse_quantizer.scale)
             qparam_dict_r['scale_hw_f'] = float(cls.weighthh_reverse_quantizer.scale)

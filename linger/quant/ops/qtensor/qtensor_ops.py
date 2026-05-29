@@ -45,7 +45,7 @@ def add(op, input, other):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QAdd(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input = 2)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input, other)
@@ -67,7 +67,7 @@ def mul(op, input, other):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QMul(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input = 2)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input, other)
@@ -88,7 +88,7 @@ def matmul(op, input, other):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QMatmul(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input = 2)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input, other)
@@ -121,7 +121,7 @@ def bmm(op, input, other):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QBmm(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input = 2)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input, other)
@@ -143,7 +143,7 @@ def cat(op, input, dim = 0):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QCat(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input = 2, is_cat=True)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input[0].device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input, dim)
@@ -362,7 +362,7 @@ def sigmoid(op, input):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QSigmoid(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input=1)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input)
@@ -383,7 +383,7 @@ def tanh(op, input):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QTanh(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input=1)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input)
@@ -406,7 +406,7 @@ def gelu(op, input, approximate: str = "none"):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QGelu(activate_config=QUANT_CONFIGS.quant_info.to_dict(), num_input=1)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     return q_layer(input)
@@ -428,7 +428,7 @@ def swish(op, input, inplace: bool = False):
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QSwish(activate_config=QUANT_CONFIGS.quant_info.to_dict(), num_input=1)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     return q_layer(input)
@@ -448,7 +448,7 @@ def softmax(op, input, dim, _stacklevel: int = 3, dtype: Optional[DType] = None)
         q_layer = getattr(module_self, var_name)
     else:
         q_layer = QSoftmax(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input=1, dim = dim)
-        q_layer.training = module_self.training
+        q_layer.train(module_self.training)
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     q_layer.dim = dim

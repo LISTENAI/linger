@@ -126,6 +126,9 @@ class OnnxRunner:
                                 print(f"  -> ERROR: Could not extract quant params. Skipping.")
                                 continue
 
+                            if consumer_node.op_type == "LSTMInt" and matched_quant_input_info['scale_attr'] == "scale_c": ###LSTMInt 算子的cell固定为int32类型，但实际数据为int16
+                                data_bits = 32
+
                             quantized_output_name = f"{original_source}_quantized"
                             # import pdb; pdb.set_trace()
                             quant_node = helper.make_node('Quant', inputs=[original_source], outputs=[quantized_output_name],
@@ -150,6 +153,10 @@ class OnnxRunner:
                             print(f"  -> INFO: Connection is to a non-quantizable input slot of '{consumer_node.name}'. This path is correct.")
 
                     elif consumer_node.op_type in TRANSPARENT_OPS:
+                        if consumer_node.op_type == "Gather" and consumer_index == 1: ###Gather算子的indices输入为int32类型，不需要处理
+                            path_fixed = True
+                            break
+                        
                         for output_tensor in consumer_node.output:
                             if output_tensor not in visited_tensors:
                                 print(f"  -> Traversing through transparent op '{consumer_node.name}'...")

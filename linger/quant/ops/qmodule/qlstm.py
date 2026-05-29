@@ -255,7 +255,9 @@ class QLSTMOnnxFunction(torch.autograd.Function):
         if has_hidden and has_cell:
             hidden_state_f = hidden_state if qparam_dict_r is None else _select_direction_state(g, hidden_state, 0)
             cell_state_f = cell_state if qparam_dict_r is None else _select_direction_state(g, cell_state, 0)
-            input_list[1:1] = [hidden_state_f, cell_state_f]
+            hidden_state_int = quantlinear(g, hidden_state_f, qparam_dict['scale_h_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+            cell_state_int = quantlinear(g, cell_state_f, qparam_dict['scale_c_f'], qparam_dict['platform_s'], 32, 0)
+            input_list[1:1] = [hidden_state_int, cell_state_int]
         if bias_ih is not None:
             input_list.append(bias_ih)
             input_list.append(bias_hh)
@@ -268,10 +270,11 @@ class QLSTMOnnxFunction(torch.autograd.Function):
             else:
                 input_list_r = [input, weight_ih_reverse, weight_hh_reverse]
             if has_hidden and has_cell:
-                input_list_r[1:1] = [
-                    _select_direction_state(g, hidden_state, 1),
-                    _select_direction_state(g, cell_state, 1),
-                ]
+                hidden_state_f = _select_direction_state(g, hidden_state, 1),
+                cell_state_f = _select_direction_state(g, cell_state, 1),
+                hidden_state_int = quantlinear(g, hidden_state_f, qparam_dict['scale_h_f'], qparam_dict['platform_s'], qparam_dict['x_bits_i'], 0)
+                cell_state_int = quantlinear(g, cell_state_f, qparam_dict['scale_c_f'], qparam_dict['platform_s'], 32, 0)
+                input_list_r[1:1] = [hidden_state_int, cell_state_int]
             if bias_ih_reverse is not None:
                 input_list_r.append(bias_ih_reverse)
                 input_list_r.append(bias_hh_reverse)
@@ -337,7 +340,9 @@ class QLSTMCell(nn.Module):
         forget_part_q30 = mul_requant_int_ste(G_f_q15, cell_q15, 30, 30)
         input_part_q30 = mul_requant_int_ste(G_i_q15, G_c_q15, 30, 30)
         cell_next_q15 = clamp_to_int32_ste(requant_int_ste(forget_part_q30 + input_part_q30, 30, 15))
-        tanh_cell_q15 = runtime_activation_q15_from_q11_ste(requant_int_ste(cell_next_q15, 15, active_q_in), "tanh")
+        cell_next_out = clamp_to_int32_ste(requant_int_ste(forget_part_q30 + input_part_q30, 30, 11))
+
+        tanh_cell_q15 = runtime_activation_q15_from_q11_ste(cell_next_out, "tanh")
 
         cy_int = requant_int_ste(cell_next_q15, 15, q_c) if q_c != 15 else cell_next_q15
         hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
@@ -387,7 +392,9 @@ class QLSTMCell(nn.Module):
         G_c_q15 = requant_int_ste(G_c_q31, 31, 15)
         G_o_q15 = requant_int_ste(G_o_q31, 31, 15)
 
-        cell_q27 = requant_int_ste(cell_int * G_f_q15 + G_i_q15 * G_c_q15, 30, active_q_in)
+        l_tanh_in = clamp_to_int32_ste(cell_int * G_f_q15)
+        r_tanh_in = clamp_to_int32_ste(G_i_q15 * G_c_q15)
+        cell_q27 = requant_int_ste(l_tanh_in + r_tanh_in, 30, active_q_in)
         tanh_cell_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(cell_q27), "tanh")
         tanh_cell_q15 = requant_int_ste(tanh_cell_q31, 31, 15)
 

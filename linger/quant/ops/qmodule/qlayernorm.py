@@ -144,7 +144,8 @@ class QLayerNorm(QModuleMixin, nn.LayerNorm):
     ):
         return cls(
             normalized_shape = module.normalized_shape,
-            eps = module.eps,
+            # eps = module.eps,
+            eps = 1e-5,
             elementwise_affine = module.elementwise_affine,
             # bias = module.bias is not None,
             device = device,

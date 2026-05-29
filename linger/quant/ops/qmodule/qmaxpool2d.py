@@ -53,7 +53,7 @@ class QMaxPool2d(QModuleMixin, nn.MaxPool2d):
             )
             return from_tensor_to_qtensor(out, scale, data_bits)
         else:
-            return F.max_pool2d(
+            out = F.max_pool2d(
                     input,
                     self.kernel_size,
                     self.stride,
@@ -62,5 +62,6 @@ class QMaxPool2d(QModuleMixin, nn.MaxPool2d):
                     ceil_mode=self.ceil_mode,
                     return_indices=self.return_indices,
                 )
+            return from_tensor_to_qtensor(out, self.input_quantizer.scale, self.input_quantizer.data_bits)
         
 

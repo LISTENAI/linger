@@ -330,6 +330,38 @@ def simulate_avgpool2d(input, *, input_scale, output_scale, kernel_size, stride,
     return out_int.to(dtype=input.dtype) / output_scale_value
 
 
+def simulate_global_avgpool2d(input, *, input_scale, output_scale, input_round_mode=QuantMode.floor_add, output_round_mode=QuantMode.floor_add, output_quant_min=None, output_quant_max=None):
+    input_scale_value = float(input_scale) if torch.is_tensor(input_scale) else float(input_scale)
+    output_scale_value = float(output_scale) if torch.is_tensor(output_scale) else float(output_scale)
+    input_scale_value = max(input_scale_value, 1e-12)
+    output_scale_value = max(output_scale_value, 1e-12)
+    quant_input = input * input_scale_value
+    if input_round_mode == QuantMode.floor:
+        quant_input = torch.floor(quant_input)
+    elif input_round_mode == QuantMode.round:
+        quant_input = torch.round(quant_input)
+    else:
+        quant_input = torch.floor(quant_input + 0.5)
+
+    sum_int = quant_input.sum(dim=(-2, -1), keepdim=True)
+    divisor = torch.full_like(
+        sum_int,
+        float(input.shape[-2] * input.shape[-1]),
+        dtype=_FLOAT_DTYPE,
+        device=input.device,
+    )
+    out_int = simulate_avgpool_int_div(
+        sum_int,
+        divisor,
+        round_mode=output_round_mode,
+        input_scale=input_scale_value,
+        output_scale=output_scale_value,
+    )
+    if output_quant_min is not None or output_quant_max is not None:
+        out_int = out_int.clamp(output_quant_min, output_quant_max)
+    return out_int.to(dtype=input.dtype) / output_scale_value
+
+
 def simulate_avgpool1d(input, *, input_scale, output_scale, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override, input_round_mode=QuantMode.floor_add, output_round_mode=QuantMode.floor_add, output_quant_min=None, output_quant_max=None):
     input_scale_value = float(input_scale) if torch.is_tensor(input_scale) else float(input_scale)
     output_scale_value = float(output_scale) if torch.is_tensor(output_scale) else float(output_scale)

@@ -9,6 +9,8 @@ from ...quantizer import AQuantizer
 from ...qtensor import from_tensor_to_qtensor
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from ....utils import QuantMode
+from ....config import QUANT_CONFIGS
+from ....utils import PlatForm
 from typing import Optional, Dict, Any
 
 class QAvgPool1dOnnxFunction(torch.autograd.Function):
@@ -45,9 +47,11 @@ class QAvgPool1d(QModuleMixin, nn.AvgPool1d):
         constrain: Optional[Dict[str, Any]] = None,
         device: Optional[Dict[str, Any]] = None,
     ):
+        _kernel_size = module.kernel_size
+        _stride = module.stride
         qmodule = cls(
-            kernel_size = module.kernel_size,
-            stride = module.stride,
+            kernel_size=_kernel_size if _kernel_size is None else None,
+            stride=_stride if _stride is None else None,
             padding = module.padding,
             ceil_mode = module.ceil_mode,
             count_include_pad = module.count_include_pad,
@@ -60,13 +64,42 @@ class QAvgPool1d(QModuleMixin, nn.AvgPool1d):
             open_ihook = True,
             open_ohook = False,
         )
+        # Restore kernel_size and stride after parent __init__
+        qmodule.kernel_size = _kernel_size
+        qmodule.stride = _stride
+
         qmodule.add_module("output_quantizer", AQuantizer(activations_cfg, constrain))
         return qmodule
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # Validate kernel_size and stride in forward
+        if hasattr(self, "kernel_size") and self.kernel_size is not None:
+            kernel_size = self.kernel_size
+            if isinstance(kernel_size, int):
+                kernel_size = (kernel_size,)
+            input_dim = input.shape[-1]  # For 1D, check last dimension
+            if QUANT_CONFIGS.platform in {PlatForm.venusA, PlatForm.arcs, PlatForm.mars}:
+                for k in kernel_size:
+                    if k != input_dim:
+                        assert 1 <= k <= 12, f"kernel size of venusA/arcs/mars should be in range [1, 12], got {k}"
+            elif QUANT_CONFIGS.platform in {PlatForm.venus}:
+                for k in kernel_size:
+                    if k != input_dim:
+                        assert 1 <= k <= 5, f"kernel size of venus should be in range [1, 5], got {k}"
+
+        if hasattr(self, "stride") and self.stride is not None:
+            stride = self.stride
+            if isinstance(stride, int):
+                stride = (stride,)
+            input_dim = input.shape[-1]  # For 1D, check last dimension
+            for s in stride:
+                if s != input_dim:
+                    assert s in {1, 2, 4}, f"stride of venus/arcs/mars/venusA should be in [1, 2, 4], got {s}"
+
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
-            return QAvgPool1dOnnxFunction.apply(input, self.kernel_size, self.stride, self.padding, self.ceil_mode, self.count_include_pad, qparam_dict)
+            output = QAvgPool1dOnnxFunction.apply(input, self.kernel_size, self.stride, self.padding, self.ceil_mode, self.count_include_pad, qparam_dict)
+            return from_tensor_to_qtensor(output, self.output_quantizer.scale, self.output_quantizer.data_bits)
         ref_out = F.avg_pool1d(
             input,
             self.kernel_size,

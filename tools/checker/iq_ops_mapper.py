@@ -142,14 +142,14 @@ def iqcat(inputs, kwargs):
 @register_op(op_type="Gather")
 def gather(inputs, kwargs):
     axis = kwargs.get('axis',0)
-    scale_o = kwargs.get("scale_o", kwargs.get("scale_w"))
+    scale_o = kwargs.get("scale_o", kwargs.get("scale_w", None))
     
     if not isinstance(inputs[0], torch.Tensor):
         inputs[0] = torch.tensor(inputs[0]) if not isinstance(inputs[0], np.ndarray) else torch.from_numpy(inputs[0].copy())
     if not isinstance(inputs[1], torch.Tensor):
         inputs[1] = torch.tensor(inputs[1]) if not isinstance(inputs[1], np.ndarray) else torch.from_numpy(inputs[1].copy())
 
-    if not isinstance(inputs[0], QTensor) and inputs[0].dtype != torch.float32:
+    if not isinstance(inputs[0], QTensor) and inputs[0].dtype != torch.float32 and scale_o is not None:
         inputs[0] = dequant(inputs[0], scale_o)
 
     if inputs[1].numel() == 1: # example : a = torch.randn([1,3,224,224]); a[:,:,2]
