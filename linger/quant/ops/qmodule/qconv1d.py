@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
-from ....constrain import CConvBN1d, ConvBN1d
+from ....constrain import CConvBN1d, ConvBN1d, CConv1d
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
 
@@ -30,6 +30,7 @@ class QConv1dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
+@register_qmodule(CConv1d)
 @register_qmodule(ConvBN1d)
 @register_qmodule(CConvBN1d)
 @register_qmodule(torch.nn.Conv1d)

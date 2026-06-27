@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 # from torch.fx import symbolic_trace, GraphModule
 
-from .quant.qtensor import QTensor
+from .quant.qtensor import QTensor, from_qtensor_to_tensor
 from .quant.ops import *
 from .config import QuantConfig, QUANT_CONFIGS
 from .quant.ops.qconfig import _QMODULE_TABLE, _QTENSOR_OP_TABLE, quantize_module, quantize_tensor
@@ -92,6 +92,37 @@ def _match_part(name: str, mix_parts: list):
             return part
     return None
 
+def _dequantize_qtensor_value(value):
+    if isinstance(value, QTensor):
+        return from_qtensor_to_tensor(value)
+    if isinstance(value, tuple):
+        return tuple(_dequantize_qtensor_value(item) for item in value)
+    if isinstance(value, list):
+        return [_dequantize_qtensor_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _dequantize_qtensor_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+def _dequantize_disabled_float_input(module, input):
+    return _dequantize_qtensor_value(input)
+
+def _matches_disabled_submodel(name: str, disabled_submodels):
+    return any(
+        name == p or name.startswith(p + '.') or fnmatch(name, p)
+        for p in disabled_submodels
+    )
+
+def _is_disabled_submodel_boundary(name: str, disabled_submodels):
+    if not _matches_disabled_submodel(name, disabled_submodels):
+        return False
+    if name == "":
+        return True
+    parent_name = name.rsplit(".", 1)[0] if "." in name else ""
+    return not _matches_disabled_submodel(parent_name, disabled_submodels)
+
 def constrain(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
     c_configs = QUANT_CONFIGS
     if config_file is not None:
@@ -104,7 +135,7 @@ def constrain(model: nn.Module, config_file: str = None, disable_module=None, di
                 _CMODULE_TABLE.pop(name)
 
     for name, m in model.named_modules():
-        if any(name == p or name.startswith(p + '.') for p in disabled_submodels): # disable_submodel 直接按照module的名称进行屏蔽
+        if _matches_disabled_submodel(name, disabled_submodels): # disable_submodel 直接按照module的名称进行屏蔽
             continue
         matched_part = _match_part(name, c_configs.mix_parts)
         constrain_cfg = {**c_configs.clamp_info.to_dict(), **matched_part['clamp_info'].to_dict()} if matched_part is not None else c_configs.clamp_info.to_dict()
@@ -119,6 +150,8 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
     if config_file is not None:
         q_configs._load_from_yaml(config_file)
     disabled_submodels = [] if disable_submodel is None else list(disable_submodel)
+    explicit_disabled_submodels = tuple(disabled_submodels)
+    disabled_module_types = tuple(() if disable_module is None else disable_module)
     
     if disable_module is not None:
         for name in disable_module:
@@ -129,8 +162,13 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
     # model = _replace_ops(traced_model, q_configs)
 
     for name, m in model.named_modules():
-        if any(name == p or name.startswith(p + '.') for p in disabled_submodels): # disable_submodel 直接按照module的名称进行量化屏蔽
+        if _matches_disabled_submodel(name, disabled_submodels): # disable_submodel 直接按照module的名称进行量化屏蔽
+            if _is_disabled_submodel_boundary(name, explicit_disabled_submodels):
+                m.register_forward_pre_hook(_dequantize_disabled_float_input)
             continue
+
+        if type(m) in disabled_module_types:
+            m.register_forward_pre_hook(_dequantize_disabled_float_input)
 
         m.register_forward_pre_hook(hook_pre_forward)
         m.register_forward_hook(hook_forward)
@@ -258,6 +296,12 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
 
     model.to(q_configs.device)
     return model
+
+def quant_init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
+    return init(model=model, config_file=config_file, disable_module=disable_module, disable_submodel=disable_submodel)
+
+def constrain_init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):
+    return constrain(model=model, config_file=config_file, disable_module=disable_module, disable_submodel=disable_submodel)
 
 
 # 关闭QTensor类算子时使用

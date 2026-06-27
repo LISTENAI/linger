@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
-from ....constrain import ConvTransposeBN2d, CConvTransposeBN2d
+from ....constrain import ConvTransposeBN2d, CConvTransposeBN2d, CConvTranspose2d
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Union, Dict, Any
 
@@ -31,6 +31,7 @@ class QConvTranspose2dOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
+@register_qmodule(CConvTranspose2d)
 @register_qmodule(ConvTransposeBN2d)
 @register_qmodule(CConvTransposeBN2d)
 @register_qmodule(torch.nn.ConvTranspose2d)

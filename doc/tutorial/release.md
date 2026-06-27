@@ -27,3 +27,7 @@
 # V3.0.9  2026.05.29
 * 新增relu6，QGlobalAveragePool2d算子；
 * 优化tvalidator相关代码；
+# V3.0.10  2026.06.26
+* 优化导图代码，解决混合量化导图报错问题；
+* 优化layernorm、qlstm算子功能和计算逻辑；
+* 完善linger.constrain()+linger.init()功能；

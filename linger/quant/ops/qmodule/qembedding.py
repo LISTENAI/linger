@@ -9,6 +9,7 @@ from ..qconfig import register_qmodule
 from typing import Optional, Union, Dict, Any
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....constrain import CEmbedding
 
 class QEmbeddingOnnxFunction(torch.autograd.Function):
     @staticmethod
@@ -38,6 +39,7 @@ class QEmbeddingOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
+@register_qmodule(CEmbedding)
 @register_qmodule(torch.nn.Embedding)
 class QEmbedding(QModuleMixin, nn.Embedding):
     @classmethod

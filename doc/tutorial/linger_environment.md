@@ -140,72 +140,14 @@ tprofile --help
 
 ## 四、Docker 镜像安装方式
 
-我们将提供几种典型镜像版本供使用（暂未开放）：
+我们将提供几种典型镜像版本供使用：
 
 - CPU 版本
-- CUDA 11.2 版本
+- CUDA 11.8 版本
 - CUDA 12.2 版本
-- CUDA 12.4 版本
+- CUDA 12.4 版本（暂未开放）
 
-### 1. 安装 Docker
-
-若未安装 Docker，请参考以下链接进行安装。若已安装，可直接进行权限验证。
-
-- [Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
-- [Debian](https://docs.docker.com/engine/install/debian/)
-- [CentOS](https://docs.docker.com/engine/install/centos/)
-- [其他 Linux 发行版](https://docs.docker.com/engine/install/binaries/)
-
-安装完成后，运行以下命令查看版本，验证 Docker 是否安装成功并具备足够权限：
-
-```bash
-docker version
-```
-
-如果出现 `Got permission denied` 权限错误，说明当前用户权限不足，可添加 Docker 用户组权限：
-
-```bash
-sudo groupadd docker
-sudo gpasswd -a $USER docker
-newgrp docker
-docker ps
-```
-
-再次执行 `docker version`，若不再出现权限错误，即可继续下一步。
-
-### 2. 启动 Docker 服务
-
-```bash
-sudo systemctl start docker
-```
-
-### 3. 拉取镜像并运行容器
-
-拉取镜像：
-
-```bash
-# CPU 版本
-docker pull listenai/linger:x.x.x
-
-# GPU 版本（CUDA 11.2 / 12.2 等）
-docker pull listenai/linger_gpu:x.x.x
-```
-
-运行容器：
-
-```bash
-# CPU 版本
-docker container run -it listenai/linger:x.x.x /bin/bash
-
-# GPU 版本
-docker container run -it listenai/linger_gpu:x.x.x /bin/bash
-```
-
-`x.x.x` 表示具体版本号，也可默认安装最新版本。若一切正常，运行后将进入容器命令行，例如：
-
-```bash
-root@66d80f4aaf1e:/LISTENAI#
-```
+使用方法见  [如何使用Docker创建linger&thinker统一开发环境](linger_docker.md)
 
 ## 五、安装 LNN 开发套件
 
@@ -278,53 +220,32 @@ conda activate base
 conda remove -n xxx --all
 ```
 
-### 2. Docker 常用命令
-
-查询容器 ID：
-
-```bash
-docker ps
-```
-
-从宿主机拷贝文件到容器：
-
-```bash
-docker cp 要拷贝的文件路径 容器名:容器内部路径
-```
-
-示例：
-
-```bash
-docker cp model 2ef7893f06bc:linger
-```
-
-从容器拷贝文件到宿主机：
-
-```bash
-docker cp 容器名:容器内部路径 宿主机路径
-```
-
-示例：
-
-```bash
-docker cp 2ef7893f06bc:/models /opt
-```
-
-终止运行的容器：
-
-```bash
-docker container kill [containID]
-```
-
-移除停止的容器：
-
-```bash
-docker container rm [containID]
-```
-
-## 补充说明
-
-- 如果在安装过程中遇到依赖问题，可参考 `requirements.txt` 手动安装缺失包；Thinker-only 场景应优先只补充实际缺失的 Thinker 依赖，避免安装 PyTorch 相关包。
-- Linger GPU 环境需要检查 `libcuda`、`libcudnn` 等系统依赖是否正确安装。
-- Thinker-only 环境更适合 CI、模型打包、仿真验证和执行器集成，不依赖 NVIDIA GPU。
-- 如果使用 Docker 镜像，可直接在容器内运行安装命令，减少本地环境配置问题。
+### 2. docker其他常用指令
+- 查询容器ID：
+  ```bash
+  docker ps
+  ```
+- 从宿主机拷贝文件到容器：
+  ```bash
+  docker cp 要拷贝的文件路径 容器名：容器内部路径
+  ```
+  示例：
+  ```bash
+  docker cp model 2ef7893f06bc:/root/workspace
+  ```
+- 从容器拷贝文件到宿主机：
+  ```bash
+  docker cp 容器名：容器内部路径  宿主机路径
+  ```
+  示例：
+  ```bash
+  docker cp 2ef7893f06bc:/models /opt
+  ```
+- 终止运行的容器：
+  ```bash
+  docker stop [containID]
+  ```
+- 移除停止的容器：
+  ```bash
+  docker rm [containID]
+  ```

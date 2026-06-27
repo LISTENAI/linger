@@ -109,7 +109,7 @@ def extract_cifar10(tar_path, extract_path='./data'):
         raise FileNotFoundError(f"解压后未找到cifar-10-batches-py目录，请检查tar文件内容")
     
     print(f"数据集已成功解压到: {extracted_dir}")
-    return extracted_dir
+    return extract_path
 
 def get_cifar10_data(tar_path, batch_size=128):
     """
@@ -121,8 +121,8 @@ def get_cifar10_data(tar_path, batch_size=128):
     """
     # 解压数据集
     # import pdb; pdb.set_trace()
-    # data_dir = extract_cifar10(tar_path)
-    data_dir = './data'
+    data_dir = extract_cifar10(tar_path)
+    # data_dir = './data'
     
     # 数据增强和标准化
     transform_train = transforms.Compose([
@@ -234,18 +234,19 @@ def export_to_onnx(model, device, onnx_path='alexnet_cifar10.onnx'):
     dummy_input = torch.randn(1, 3, 32, 32).to(device)
     
     # 导出ONNX模型
-    linger.onnx.export(
-        model, 
-        dummy_input,
-        onnx_path,
-        export_params=True,
-        opset_version=11,
-        do_constant_folding=True,
-        input_names=['input'],
-        output_names=['output']
-    )
+    with torch.no_grad():
+        linger.onnx.export(
+            model, 
+            dummy_input,
+            onnx_path,
+            export_params=True,
+            opset_version=11,
+            do_constant_folding=True,
+            input_names=['input'],
+            output_names=['output']
+        )
     
-    print(f"ONNX模型已导出至: {onnx_path}")
+        print(f"ONNX模型已导出至: {onnx_path}")
     
     # 验证ONNX模型
     onnx_model = onnx.load(onnx_path)
@@ -291,8 +292,8 @@ def export_to_onnx(model, device, onnx_path='alexnet_cifar10.onnx'):
 def main():
     # 超参数设置
     BATCH_SIZE = 128
-    EPOCHS_FLOAT = 100  #浮点训练轮数
-    EPOCHS_QUANT = 50   #量化训练轮数
+    EPOCHS_FLOAT = 10  #浮点训练轮数
+    EPOCHS_QUANT = 10   #量化训练轮数
     LR = 0.1           #训练学习率，量化训练学习率通常较小
     FLOAT_MODEL_PATH = 'alexnet_cifar10.pth'
     CONSTRAIN_MODEL_PATH = 'alexnet_cifar10_constrain.pth'
@@ -377,7 +378,7 @@ def main():
 
     # ******** 约束训练 ********
     config_file = './alexnet_config.yaml'
-    # linger.config_save_to_yaml(config_file)
+    #linger.config_save_to_yaml(config_file)
     model = linger.constrain(model, config_file=config_file)
     optimizer = optim.SGD(model.parameters(), lr=LR, momentum=0.9, weight_decay=5e-4)
 

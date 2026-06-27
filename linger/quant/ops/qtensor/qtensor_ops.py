@@ -267,7 +267,7 @@ def slice(op, input, *size):
     return op(input, *size)
 
 @register_qtensor_op([torch.ops.aten.select, torch.select, torch.Tensor.select])
-def slice(op, input, *size):
+def select(op, input, *size):
     assert isinstance(input, QTensor), 'input is not QTensor'
     if isinstance(input, QTensor):
         tmp_input = from_qtensor_to_tensor(input)

@@ -125,6 +125,15 @@ class Quantizer(torch.nn.Module, ):
         calibrate_function(self, calibrate_tensor, self.data_bits)
         return tensor
     
+    def copy_from_quantizer(self, quantizer):
+        if self.qat_method == QatMethod.MOM and quantizer.qat_method == QatMethod.MOM:
+            self.running_data = quantizer.running_data.clone()
+            if not self.is_init:
+                self.is_init.fill_(quantizer.is_init)
+        self.scale = quantizer.scale.clone()
+        if self.qat_method == QatMethod.TQT and quantizer.qat_method == QatMethod.TQT:
+            self.learning_data = quantizer.learning_data
+    
     def quant_round(self, x, mode):
         if mode == QuantMode.floor_add: 
             out = ((x + 0.5).floor() - x).detach() + x

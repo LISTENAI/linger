@@ -60,7 +60,7 @@ def create_qmodule(q_cls: QModuleMixin, torch_module: nn.Module, device: torch.d
 
     quant_mode = StringToQuantMode(attrs.get("quant_mode", 'floor_add'))
     data_bits = attrs.get('data_bits', 8)
-    parameter_bits = attrs.get("w_bits", 8)
+    parameter_bits = attrs.get("w_bits", attrs.get('parameter_bits', 8))
     bias_bits = attrs.get('bias_bits', 32)
     o_bits = attrs.get('o_bits', 8)
     scale_x = attrs.get('scale_x', None)

@@ -1102,6 +1102,7 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict.pop('scale_y_f', None)
     elif 'LayerNorm' in qparam_dict['op_type']:
         qparam_dict['scale_y_normal_f'] = float(LAYERNORM_NORMAL_SCALE)
+        qparam_dict['normalized_shape_i'] = cls.normalized_shape
     elif 'ConvTranspose' in qparam_dict['op_type']:
         qparam_dict['dilations_i'] = cls.dilation
         qparam_dict['kernel_shape_i'] = cls.kernel_size

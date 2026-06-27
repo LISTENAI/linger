@@ -10,6 +10,7 @@ from ..qconfig import register_qmodule
 from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ....config import QUANT_CONFIGS
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....constrain import CLayerNorm
 
 import lingerext
 
@@ -130,6 +131,7 @@ class QLayerNormFunction(torch.autograd.Function):
 
         return gradInput, gradWeight, gradBias, None, None, None, None, None, None
 
+@register_qmodule(CLayerNorm)
 @register_qmodule(torch.nn.LayerNorm)
 class QLayerNorm(QModuleMixin, nn.LayerNorm):
     @classmethod

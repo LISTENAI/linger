@@ -3,6 +3,7 @@ from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 from typing import Optional, Dict, Any
+from ....constrain import CBatchNorm1d
 
 
 class QBatchNorm1dOnnxFunction(torch.autograd.Function):
@@ -31,7 +32,7 @@ class QBatchNorm1dOnnxFunction(torch.autograd.Function):
         output.setType(input.type())
         return output
 
-
+@register_qmodule(CBatchNorm1d)
 @register_qmodule(torch.nn.BatchNorm1d)
 class QBatchNorm1d(QModuleMixin, torch.nn.BatchNorm1d):
     def __init__(self, *args, **kwargs):

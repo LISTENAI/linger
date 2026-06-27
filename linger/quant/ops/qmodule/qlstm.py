@@ -16,6 +16,7 @@ from ...quantizer import WQuantizer, AQuantizer, BQuantizer
 from ....config import QUANT_CONFIGS
 from ....utils import _unbind, _unbind_packed, _slice, hx_slice, QatMethod, PlatForm, QuantMode
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....constrain import CLSTM
 
 import lingerext
 
@@ -337,10 +338,10 @@ class QLSTMCell(nn.Module):
         G_o_q15 = runtime_activation_q15_from_q11_ste(clamp_to_int32_ste(G_o_int), "sigmoid")
 
         cell_q15 = requant_int_ste(cell_int, q_c, 15) if q_c != 15 else cell_int
-        forget_part_q30 = mul_requant_int_ste(G_f_q15, cell_q15, 30, 30)
-        input_part_q30 = mul_requant_int_ste(G_i_q15, G_c_q15, 30, 30)
-        cell_next_q15 = clamp_to_int32_ste(requant_int_ste(forget_part_q30 + input_part_q30, 30, 15))
-        cell_next_out = clamp_to_int32_ste(requant_int_ste(forget_part_q30 + input_part_q30, 30, 11))
+        forget_part_q30 = clamp_to_int32_ste(mul_requant_int_ste(G_f_q15, cell_q15, 30, 30))
+        input_part_q30 = clamp_to_int32_ste(mul_requant_int_ste(G_i_q15, G_c_q15, 30, 30))
+        cell_next_q15 = clamp_to_int32_ste(requant_int_ste(clamp_to_int32_ste(forget_part_q30 + input_part_q30), 30, 15))
+        cell_next_out = clamp_to_int32_ste(requant_int_ste(clamp_to_int32_ste(forget_part_q30 + input_part_q30), 30, 11))
 
         tanh_cell_q15 = runtime_activation_q15_from_q11_ste(cell_next_out, "tanh")
 
@@ -392,17 +393,18 @@ class QLSTMCell(nn.Module):
         G_c_q15 = requant_int_ste(G_c_q31, 31, 15)
         G_o_q15 = requant_int_ste(G_o_q31, 31, 15)
 
-        l_tanh_in = clamp_to_int32_ste(cell_int * G_f_q15)
+        cell_int_q15 = requant_int_ste(cell_int, q_c, 15)
+        l_tanh_in = clamp_to_int32_ste(cell_int_q15 * G_f_q15)
         r_tanh_in = clamp_to_int32_ste(G_i_q15 * G_c_q15)
         cell_q27 = requant_int_ste(l_tanh_in + r_tanh_in, 30, active_q_in)
         tanh_cell_q31 = runtime_activation_q31_from_q27_ste(clamp_to_int32_ste(cell_q27), "tanh")
         tanh_cell_q15 = requant_int_ste(tanh_cell_q31, 31, 15)
 
-        cy_int = requant_int_ste(cell_q27, active_q_in, q_c)
+        cy_int = requant_int_ste(cell_q27, active_q_in, 15)
         hidden_bits = getattr(hidden_quantizer, "data_bits", 8)
         hy_int = clamp_to_bits_ste(requant_int_ste(G_o_q15 * tanh_cell_q15, 30, q_h), hidden_bits)
         hy = hy_int.to(dtype=input_x.dtype) / float(2 ** q_h)
-        cy = cy_int.to(dtype=input_x.dtype) / float(2 ** q_c)
+        cy = cy_int.to(dtype=input_x.dtype) / float(2 ** 15)
         return hy, cy
 
     def forward(self, input_x, hidden, cx, weight_ih, weight_hh, bias_ih, bias_hh,
@@ -423,6 +425,7 @@ class QLSTMCell(nn.Module):
             )
         raise NotImplementedError(f"QLSTM exact runtime is unsupported on platform {platform}")
         
+@register_qmodule(CLSTM)
 @register_qmodule(torch.nn.LSTM)
 class QLSTM(QModuleMixin, nn.LSTM):
     @classmethod
@@ -546,9 +549,13 @@ class QLSTM(QModuleMixin, nn.LSTM):
     
     def quantize_lstm_out(self, input: torch.Tensor, direct) -> torch.Tensor:
         if direct:
-            fake_out = self.output_reverse_quantizer(input)
+            self.output_reverse_quantizer.copy_from_quantizer(self.hidden_quantizer)
+            fake_out = self.output_reverse_quantizer(input, self.output_reverse_quantizer.scale)
+            # fake_out = self.output_reverse_quantizer(input)
         else:
-            fake_out = self.output_quantizer(input)
+            # fake_out = self.output_quantizer(input)
+            self.output_quantizer.copy_from_quantizer(self.hidden_quantizer)
+            fake_out = self.output_quantizer(input, self.output_quantizer.scale)
         return fake_out
         # return from_tensor_to_qtensor(fake_out, self.output_quantizer.scale, self.output_quantizer.data_bits)
     
@@ -573,7 +580,7 @@ class QLSTM(QModuleMixin, nn.LSTM):
 
     def _quantize_hidden_step_ste(self, hidden, direct, hidden_quantizer, runtime_hidden_scale):
         hidden_q = self._quantize_hidden_step(hidden, direct)
-        hidden_quantizer.scale.fill_(runtime_hidden_scale)
+        # hidden_quantizer.scale.fill_(runtime_hidden_scale)
         return self._blend_exact_with_quantizer_grad(hidden, hidden_q)
 
     def _quantize_output_ste(self, output, direct):

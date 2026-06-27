@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .qmodule import QModuleMixin
 from ..qconfig import register_qmodule
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
+from ....constrain import CLinear
 from typing import Optional, Union, Dict, Any
 
 class QLinearOnnxFunction(torch.autograd.Function):
@@ -33,6 +34,7 @@ class QLinearOnnxFunction(torch.autograd.Function):
                 **qparam_dict
             )
 
+@register_qmodule(CLinear)
 @register_qmodule(torch.nn.Linear)
 class QLinear(QModuleMixin, nn.Linear):
     @classmethod
