@@ -31,3 +31,5 @@
 * 优化导图代码，解决混合量化导图报错问题；
 * 优化layernorm、qlstm算子功能和计算逻辑；
 * 完善linger.constrain()+linger.init()功能；
+# V3.0.11  2026.07.23
+* 解决linger、thinker一致性问题。

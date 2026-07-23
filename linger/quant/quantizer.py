@@ -288,7 +288,8 @@ class Quantizer(torch.nn.Module, ):
         #     if self.qat_method == QatMethod.MOM and self.running_data != 0.0:
         #         learning_data = self.data_bits - 1 - self.running_data.abs().max().log2()
         #         self.scale.fill_(float(torch.exp2(self.quant_round(learning_data, self.round_mode).clamp(min=0, max=23))))
-        scale = self.scale
+        if scale is None:
+            scale = self.scale
         if QUANT_CONFIGS.quant_method == FakeQuantMethod.CUDA:
             out = BIASQUANT.apply(input, self.data_bits, scale, min_scale, self.quant_min, self.quant_max)
         else:
