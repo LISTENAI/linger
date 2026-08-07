@@ -77,14 +77,15 @@ class QEmbedding(QModuleMixin, nn.Embedding):
             qparam_dict = generate_onnx_qparam_dict(self, False)
             out_q =  QEmbeddingOnnxFunction.apply(input, self.qweight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse, qparam_dict)
         else:
+            weight = self._to_compute_dtype(self.qweight)
             out_q =  F.embedding(
                     input,
-                    self.qweight,
+                    weight,
                     self.padding_idx,
                     self.max_norm,
                     self.norm_type,
                     self.scale_grad_by_freq,
                     self.sparse,
                 )
+        out_q = self._to_transport_dtype(out_q)
         return from_tensor_to_qtensor(out_q, self.weight_quantizer.scale, self.weight_quantizer.data_bits)
-

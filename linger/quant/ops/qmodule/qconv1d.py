@@ -86,5 +86,5 @@ class QConv1d(QModuleMixin, torch.nn.Conv1d):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
             return QConv1dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.dilation, self.groups, qparam_dict)
-        return self._conv_forward(input, self.qweight, self.qbias)
-
+        weight, bias = self._get_compute_weight_bias()
+        return self._conv_forward(input, weight, bias)

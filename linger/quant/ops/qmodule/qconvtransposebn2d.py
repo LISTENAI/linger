@@ -94,7 +94,9 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.training:
             # conv_rlt = self.conv(input) # for calculate bn mean and var
-            conv_rlt = F.conv_transpose2d(input, self.conv.weight, self.conv.bias, self.conv.stride,
+            conv_weight = self._to_compute_dtype(self.conv.weight)
+            conv_bias = self._prepare_bias_for_compute(self.conv.bias, conv_weight)
+            conv_rlt = F.conv_transpose2d(input, conv_weight, conv_bias, self.conv.stride,
                                           self.conv.padding, self.conv.output_padding, self.conv.groups, self.conv.dilation,)
             N, C, H, W = conv_rlt.size()
             bn_size = N * H * W
@@ -106,9 +108,9 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
             unbias_var_ = sum_var_ / (bn_size - 1)  # 无偏方差，用 unbias_var（除 N-1）来更新 running_var（长期的、用于推理时的估计），在统计上更合理（减少估计偏差）
             unbias_var_ = torch.clamp(unbias_var_, min=0.0)
             self.bn.running_mean = (
-                (1 - self.bn.momentum) * self.bn.running_mean + self.bn.momentum * mean_.detach())
+                (1 - self.bn.momentum) * self.bn.running_mean + self.bn.momentum * mean_.detach()).to(self.bn.running_mean.dtype)
             self.bn.running_var = (
-                (1 - self.bn.momentum) * self.bn.running_var + self.bn.momentum * unbias_var_.detach())
+                (1 - self.bn.momentum) * self.bn.running_var + self.bn.momentum * unbias_var_.detach()).to(self.bn.running_var.dtype)
 
             bias_var_ = sum_var_ / bn_size  # 计算当前 batch 的标准差用于“在该 batch 上归一化” —— 这是即时、直接的标准化数学操作
             bias_var_ = torch.clamp(bias_var_, min=0.0)
@@ -140,6 +142,8 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
             # fake_quant new_weight and new_bias
             fake_weight = self.weight_quantizer(new_weight)
             fake_bias = self.bias_quantizer(new_bias)
+            fake_weight = self._to_compute_dtype(fake_weight)
+            fake_bias = self._prepare_bias_for_compute(fake_bias, fake_weight)
 
             new_conv_rlt = output = F.conv_transpose2d(input, fake_weight, fake_bias,
                                     self.stride, self.padding, self.output_padding, self.groups, self.dilation)
@@ -166,13 +170,13 @@ class QConvTransposeBN2d(QModuleMixin, ConvTransposeBN2d):
                 if self.bias_quantizer.clamp_value is not None:
                     new_bias = static_clip(new_bias, self.bias_quantizer.clamp_value)
             # 结束
-            self.weight.data = new_weight
-            self.bias.data = new_bias
+            self.weight.data = new_weight.to(self.weight.dtype)
+            self.bias.data = new_bias.to(self.bias.dtype)
             if torch.onnx.is_in_onnx_export():
                 qparam_dict = generate_onnx_qparam_dict(self, False)
                 output = QConvTransposeBN2dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.output_padding, self.dilation, self.groups, qparam_dict)
             else:
-                output = F.conv_transpose2d(input, self.qweight, self.qbias, 
+                weight, bias = self._get_compute_weight_bias()
+                output = F.conv_transpose2d(input, weight, bias,
                                             self.stride, self.padding, self.output_padding, self.groups, self.dilation)
         return output
-

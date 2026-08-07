@@ -114,8 +114,8 @@ def quant(x, bits=8, scale=-1, zero_point=0, mode=QuantMode.floor_add):
         x_quant = x.round()
 
     x_quant = x_quant.clamp(-bound_value - 1 + zero_point_, bound_value + zero_point_)    
-    x = x_quant.float()
-    return x, scale_local
+    # x = x_quant.float()
+    return x_quant, scale_local
 
 def dequant(x, scale):
     scale_tensor = None

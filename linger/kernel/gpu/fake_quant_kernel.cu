@@ -44,7 +44,7 @@ std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(
     // printf("到位置 2 了 \n");
     // 计算 scale
     float f = (float)(bit - 1) - factor;
-    float scale = powf(2.0f, fminf(fmaxf(roundf(f), 0.0f), 23.0f));
+    float scale = powf(2.0f, fmaxf(roundf(f), 0.0f));
     // scale = fminf(fmaxf(scale, 1e-6f), powf(2.0f, 32));
     // printf("到位置 1 了,scale:%f \n", scale);
     auto output = torch::empty_like(input);
@@ -175,7 +175,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, float> fake_quant_cuda_w
     // printf("到位置 2 了 \n");
     // 计算 scale
     float f = (float)(bit - 1) - factor;
-    float scale = powf(2.0f, fminf(fmaxf(roundf(f), 0.0f), 23.0f));
+    float scale = powf(2.0f, fmaxf(roundf(f), 0.0f));
     // scale = fminf(fmaxf(scale, 1e-6f), powf(2.0f, 32));
     // printf("到位置 1 了,scale:%f \n", scale);
     auto output = torch::empty_like(input);
@@ -249,5 +249,4 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_gra
 
     return std::make_tuple(output, mask, scale_coff_back);
 }
-
 

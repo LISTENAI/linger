@@ -7,6 +7,7 @@ from ..qconfig import register_qmodule
 from typing import Optional, Dict, Any
 
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
+from ...quantizer import HIGH_PRECISION_BITS, HIGH_PRECISION_SCALE_MAX
 
 
 @register_qmodule(nn.ReLU6)
@@ -37,6 +38,11 @@ class QRelu6(QModuleMixin, nn.ReLU6):
             tmp_input = from_qtensor_to_tensor(input)
             scale = input.scale.detach()
             data_bits = input.data_bits
+            if data_bits >= HIGH_PRECISION_BITS:
+                tmp_input = tmp_input.to(torch.float64)
+                scale = scale.clamp(max=HIGH_PRECISION_SCALE_MAX)
             out = F.relu6(tmp_input, inplace=self.inplace)
+            if data_bits >= HIGH_PRECISION_BITS:
+                out = out.to(torch.float32)
             return from_tensor_to_qtensor(out, scale, data_bits)
         return F.relu6(input, inplace=self.inplace)

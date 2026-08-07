@@ -237,6 +237,45 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_with_grad_sca
     }
 }
 
+#ifdef LINGER_CPU_ONLY
+void find_table_gpu(torch::Tensor value, torch::Tensor table, torch::Tensor table_index)
+{
+    throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
+}
+
+torch::Tensor venus_qsigmoid_gpu(torch::Tensor a) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor venusa_qsigmoid_gpu(torch::Tensor a) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor arcs_qsigmoid_gpu(torch::Tensor a) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor venus_qtanh_gpu(torch::Tensor a) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor venusa_qtanh_gpu(torch::Tensor a) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor arcs_qtanh_gpu(torch::Tensor a) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+
+torch::Tensor venus_qsoftmax_gpu(const torch::Tensor& in, int64_t dim) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor venusa_qsoftmax_gpu(const torch::Tensor& in, int64_t dim) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor arcs_qsoftmax_gpu(const torch::Tensor& in, int64_t dim) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+torch::Tensor qlayernorm_kernel_gpu(torch::Tensor numerator, torch::Tensor denominator, float scale_x) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
+
+std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(torch::Tensor input,int bit,float factor,float scale_min, float quant_min,float quant_max)
+{
+    throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
+}
+
+std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(torch::Tensor input,int bit,float scale,float scale_min, float quant_min,float quant_max)
+{
+    throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,float> fake_quant_cuda_with_grad_scale(torch::Tensor input,int bit,float factor,float scale_min, float quant_min,float quant_max)
+{
+    throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(torch::Tensor input,int bit,float scale,float scale_min, float quant_min,float quant_max)
+{
+    throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
+}
+#endif
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {

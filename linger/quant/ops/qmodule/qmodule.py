@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from typing import Optional, Union, Dict, Any
 
 from ..qconfig import _QMODULE_TABLE
-from ...quantizer import WQuantizer, AQuantizer, BQuantizer
+from ...quantizer import AQuantizer, BQuantizer, HIGH_PRECISION_BITS, Quantizer, WQuantizer
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....config import QUANT_CONFIGS
 from ....utils import PlatForm, ActivationType, LINGER_ACTIVATION_TYPE
@@ -132,7 +132,56 @@ class QModuleMixin(ABC):
         if not hasattr(self, "bias_quantizer") or self.bias is None:
             return self.bias
         fake_bias = self.bias_quantizer(self.bias, self.weight_quantizer.scale * self.input_quantizer.scale)
-        return fake_bias
+        if torch.onnx.is_in_onnx_export():
+            return fake_bias
+        return self._prepare_bias_for_compute(fake_bias, self.weight)
+
+    def _uses_high_precision_compute(self):
+        for module in self.modules():
+            if (
+                isinstance(module, Quantizer)
+                and not module.is_bias_quantizer
+                and module.data_bits >= HIGH_PRECISION_BITS
+            ):
+                return True
+        return False
+
+    def _to_compute_dtype(self, tensor):
+        if (
+            not torch.onnx.is_in_onnx_export()
+            and self._uses_high_precision_compute()
+            and torch.is_tensor(tensor)
+            and tensor.is_floating_point()
+        ):
+            return tensor.to(torch.float64)
+        return tensor
+
+    def _to_transport_dtype(self, tensor):
+        if (
+            not torch.onnx.is_in_onnx_export()
+            and self._uses_high_precision_compute()
+            and torch.is_tensor(tensor)
+            and tensor.is_floating_point()
+        ):
+            return tensor
+        if torch.onnx.is_in_onnx_export():
+            return tensor
+        else:
+            return tensor.to(torch.float32)
+
+    def _prepare_bias_for_compute(self, bias, reference=None):
+        if bias is None or torch.onnx.is_in_onnx_export():
+            return bias
+        if self._uses_high_precision_compute():
+            return bias.to(torch.float64)
+        if reference is not None:
+            return bias.to(reference.dtype)
+        return bias
+
+    def _get_compute_weight_bias(self):
+        weight = self._to_compute_dtype(self.qweight)
+        bias = self._prepare_bias_for_compute(self.qbias, weight)
+        return weight, bias
     
     def forward(self, input: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError
@@ -143,11 +192,12 @@ class QModuleMixin(ABC):
         if isinstance(input, QTensor):
             fake_input = from_qtensor_to_tensor(input)
             self.input_quantizer.is_qtensor = True
-            self.input_quantizer.scale.fill_(input.scale.detach())
             self.input_quantizer.data_bits = input.data_bits
+            input_scale = self.input_quantizer._limit_scale(input.scale.detach())
+            self.input_quantizer.scale.fill_(input_scale)
         else:
             fake_input = self.input_quantizer(input) # 前向过程中会更新input_quantizer的scale
-        return fake_input
+        return self._to_compute_dtype(fake_input)
 
     def quantize_output(
         self,
@@ -155,6 +205,7 @@ class QModuleMixin(ABC):
         input: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        output = self._to_transport_dtype(output)
         if self.training and self.output_quantizer.clamp_value is not None:
             clamp_value = self.output_quantizer.clamp_value
             output = output.clamp(-clamp_value, clamp_value)

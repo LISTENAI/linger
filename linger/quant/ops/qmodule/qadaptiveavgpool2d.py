@@ -102,6 +102,7 @@ class QAdaptiveAvgPool2d(QModuleMixin, nn.AdaptiveAvgPool2d):
         )
         if self.training:
             aligned_out = ref_out + (aligned_out - ref_out).detach()
+        aligned_out = self._to_transport_dtype(aligned_out)
         return from_tensor_to_qtensor(
             aligned_out,
             self.output_quantizer.scale,

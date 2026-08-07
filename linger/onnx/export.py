@@ -1102,7 +1102,7 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict.pop('scale_y_f', None)
     elif 'LayerNorm' in qparam_dict['op_type']:
         qparam_dict['scale_y_normal_f'] = float(LAYERNORM_NORMAL_SCALE)
-        qparam_dict['normalized_shape_i'] = cls.normalized_shape
+        qparam_dict['axis_i'] = int(cls.axis)
     elif 'ConvTranspose' in qparam_dict['op_type']:
         qparam_dict['dilations_i'] = cls.dilation
         qparam_dict['kernel_shape_i'] = cls.kernel_size
@@ -1136,7 +1136,8 @@ def generate_onnx_qparam_dict(cls, input_list = False):
         qparam_dict['batch_first_i'] = int(cls.batch_first)
         qparam_dict['go_forward_i'] = True
         qparam_dict['scale_h_f'] = float(cls.hidden_quantizer.scale)
-        qparam_dict['scale_c_f'] = float(cls.cell_quantizer.scale)
+        if 'LSTM' in qparam_dict['op_type']:
+            qparam_dict['scale_c_f'] = float(cls.cell_quantizer.scale)
         qparam_dict['w_bits_i'] = int(cls.weightih_quantizer.data_bits)
         qparam_dict['scale_iw_f'] = float(cls.weightih_quantizer.scale)
         qparam_dict['scale_hw_f'] = float(cls.weighthh_quantizer.scale)
@@ -1151,7 +1152,8 @@ def generate_onnx_qparam_dict(cls, input_list = False):
             qparam_dict_r['batch_first_i'] = int(cls.batch_first)
             qparam_dict_r['go_forward_i'] = False
             qparam_dict_r['scale_h_f'] = float(cls.hidden_reverse_quantizer.scale)
-            qparam_dict_r['scale_c_f'] = float(cls.cell_quantizer.scale)
+            if 'LSTM' in qparam_dict['op_type']:
+                qparam_dict_r['scale_c_f'] = float(cls.cell_quantizer.scale)
             qparam_dict_r['w_bits_i'] = int(cls.weightih_reverse_quantizer.data_bits)
             qparam_dict_r['scale_iw_f'] = float(cls.weightih_reverse_quantizer.scale)
             qparam_dict_r['scale_hw_f'] = float(cls.weighthh_reverse_quantizer.scale)

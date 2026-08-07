@@ -1,0 +1,52 @@
+calibration: false
+clamp_info:
+  clamp_activation_value: null
+  clamp_bias_value: null
+  clamp_factor_value: null
+  clamp_weight_value: null
+device: cuda
+dtype: torch.float32
+open_quant: true
+platform: venusA
+quant_info:
+  a_calibrate_name: top_10
+  a_strategy: RANGE_MEAN
+  activate_bits: 16
+  activation_type: none
+  bias_bits: 32
+  is_perchannel: false
+  is_symmetry: true
+  qat_method: MOM
+  round_mode: floor_add
+  w_calibrate_name: abs_max
+  w_strategy: RANGE_MEAN
+  weight_bits: 8
+quant_method: CUDA
+seed: 42
+
+
+part1:
+  name: ['backbone.conv1']
+  quant_info:
+    input_bits: 8
+    output_bits: 32
+    bias_bits: 32
+    weight_bits: 4
+  clamp_info:
+    clamp_activation_value: 8
+    clamp_bias_value: null
+    clamp_factor_value: 3
+    clamp_weight_value: null
+
+part2:
+  name: ['backbone.blocks2', 'backbone.blocks3_0']
+  quant_info:
+    input_bits: 16
+    output_bits: 12
+    bias_bits: 32
+    weight_bits: 16
+  clamp_info:
+    clamp_activation_value: 816
+    clamp_bias_value: null
+    clamp_factor_value: null
+    clamp_weight_value: null

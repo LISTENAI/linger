@@ -2,7 +2,7 @@
 import torch
 from typing import Dict, Any, Optional
 
-from ...quantizer import AQuantizer
+from ...quantizer import AQuantizer, HIGH_PRECISION_BITS
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
 from ....config import QUANT_CONFIGS
 
@@ -27,6 +27,30 @@ class QModuleTensor(torch.nn.Module):
             self._quantize_hooks["input"] = self.register_forward_pre_hook(self.quantize_input)
         self._quantize_hooks["output"] = self.register_forward_hook(self.quantize_output)
 
+    def _uses_high_precision_compute(self):
+        quantizers = list(self.input_quantizer) + [self.output_quantizer]
+        return any(quantizer.data_bits >= HIGH_PRECISION_BITS for quantizer in quantizers)
+
+    def _to_compute_dtype(self, tensor):
+        if (
+            not torch.onnx.is_in_onnx_export()
+            and self._uses_high_precision_compute()
+            and torch.is_tensor(tensor)
+            and tensor.is_floating_point()
+        ):
+            return tensor.to(torch.float64)
+        return tensor
+
+    def _to_transport_dtype(self, tensor):
+        if (
+            not torch.onnx.is_in_onnx_export()
+            and self._uses_high_precision_compute()
+            and torch.is_tensor(tensor)
+            and tensor.is_floating_point()
+        ):
+            return tensor.to(torch.float32)
+        return tensor
+
 
     def quantize_input(self, module: torch.nn.Module, input) -> torch.Tensor:
         device = QUANT_CONFIGS.device
@@ -46,8 +70,9 @@ class QModuleTensor(torch.nn.Module):
                 if isinstance(current_input, QTensor):
                     tmp_input = from_qtensor_to_tensor(current_input)
                     self.input_quantizer[i].is_qtensor = True
-                    self.input_quantizer[i].scale.fill_(current_input.scale.detach())
                     self.input_quantizer[i].data_bits = current_input.data_bits
+                    input_scale = self.input_quantizer[i]._limit_scale(current_input.scale.detach())
+                    self.input_quantizer[i].scale.fill_(input_scale)
                 else:
                     self.input_quantizer[i].is_qtensor = False
                     tmp_input = self.input_quantizer[i](current_input)
@@ -55,7 +80,7 @@ class QModuleTensor(torch.nn.Module):
             else:
                 processed_inputs.append(input[i])
         
-        return tuple(processed_inputs)
+        return tuple(self._to_compute_dtype(value) for value in processed_inputs)
         
     
     def quantize_cat_input(self, module: torch.nn.Module, input_list: list) -> torch.Tensor:
@@ -77,8 +102,9 @@ class QModuleTensor(torch.nn.Module):
             if isinstance(current_input, QTensor):
                 tmp_input = from_qtensor_to_tensor(current_input)
                 self.input_quantizer[i].is_qtensor = True
-                self.input_quantizer[i].scale.fill_(current_input.scale.detach())
                 self.input_quantizer[i].data_bits = current_input.data_bits
+                input_scale = self.input_quantizer[i]._limit_scale(current_input.scale.detach())
+                self.input_quantizer[i].scale.fill_(input_scale)
             elif current_input.numel() != 0:
                 tmp_input = self.input_quantizer[i](current_input)
                 self.input_quantizer[i].is_qtensor = False
@@ -87,6 +113,7 @@ class QModuleTensor(torch.nn.Module):
                 self.input_quantizer[i].is_qtensor = False
             processed_inputs.append(tmp_input)
         
+        processed_inputs = [self._to_compute_dtype(value) for value in processed_inputs]
         return tuple([processed_inputs, input_list[1]])
     
     def quantize_output(
@@ -95,6 +122,7 @@ class QModuleTensor(torch.nn.Module):
         input: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        output = self._to_transport_dtype(output)
         fake_output = self.output_quantizer(output)
         return from_tensor_to_qtensor(fake_output, self.output_quantizer.scale, self.output_quantizer.data_bits)
     

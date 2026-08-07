@@ -103,13 +103,13 @@ class QGeluFunction(torch.autograd.Function):
 
         l_scale = 27 - int(math.log2(scale_x.data))
         if l_scale > 0:
-            x_q27 = (quant_x * pow(2, l_scale)).to(torch.int32)
+            x_q27 = (quant_x * pow(2, l_scale)).to(torch.int64)
         else:
-            x_q27 = (quant_x * pow(2, l_scale) + 0.5).floor().to(torch.int32)
+            x_q27 = (quant_x * pow(2, l_scale) + 0.5).floor().to(torch.int64)
         x_q27.clamp_(-2**31, 2**31 - 1)
 
         output_q27 = venusa_gelu_i32(x_q27.contiguous())
-        return output_q27.float() / float(2**27)
+        return output_q27.double() / float(2**27)
 
     @staticmethod
     def backward(ctx, grad_output):

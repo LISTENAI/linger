@@ -9,3 +9,4 @@ from .qsigmoid import QSigmoid, QSigmoidFunction
 from .qtanh import QTanh
 from .qgelu import QGelu
 from .qswish import QSwish
+from .iqvar import QVar

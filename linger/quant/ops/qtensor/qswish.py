@@ -109,7 +109,7 @@ class QSwishFunction(torch.autograd.Function):
         x_q27.clamp_(-2**31, 2**31 - 1)
 
         output_q27 = venusa_swish_i32(x_q27.contiguous())
-        return output_q27.float() / float(2**27)
+        return output_q27.double() / float(2**27)
 
     @staticmethod
     def backward(ctx, grad_output):

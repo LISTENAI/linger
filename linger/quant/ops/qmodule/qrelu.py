@@ -7,6 +7,7 @@ from ..qconfig import register_qmodule
 from typing import Optional, Union, Dict, Any
 
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor
+from ...quantizer import HIGH_PRECISION_BITS, HIGH_PRECISION_SCALE_MAX
 from ....onnx import quantlinear, generate_onnx_qparam_dict, QDOMAIN_NAME
 
 @register_qmodule(nn.ReLU)
@@ -38,8 +39,12 @@ class QRelu(QModuleMixin, nn.ReLU):
             tmp_input = from_qtensor_to_tensor(input)
             scale = input.scale.detach()
             data_bits = input.data_bits
+            if data_bits >= HIGH_PRECISION_BITS:
+                tmp_input = tmp_input.to(torch.float64)
+                scale = scale.clamp(max=HIGH_PRECISION_SCALE_MAX)
             out = F.relu(tmp_input, inplace=self.inplace)
+            if data_bits >= HIGH_PRECISION_BITS:
+                out = out.to(torch.float32)
             return from_tensor_to_qtensor(out, scale, data_bits)
         else:
             return F.relu(input, inplace=self.inplace)
-

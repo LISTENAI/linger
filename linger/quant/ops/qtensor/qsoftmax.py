@@ -65,7 +65,7 @@ class QSoftmaxFunction(torch.autograd.Function):
             output_q15 = lingerext.venusa_qsoftmax_forward(x_q25.contiguous().int(), dim)
         
         # 转换为浮点数 (Q15 -> float)
-        y = output_q15.float() / (1 << 15)
+        y = output_q15.double() / (1 << 15)
 
         # ---- reshape back to original shape ----
         output = y.reshape_as(x)

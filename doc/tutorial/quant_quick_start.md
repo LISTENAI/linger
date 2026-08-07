@@ -50,6 +50,10 @@
    model = linger.init(model, config_file=config_file)
    ```
 
+   使用TQT时，`linger.init`会新增可训练阈值参数，因此optimizer必须在该调用之后创建。TQT的单次校准、后端选择、阈值梯度检查、scale刷新和导图流程见[TQT量化训练完整指南](tqt_training.md)。
+
+   需要为敏感子模块设置不同位宽或clamp时，推荐使用YAML的`part1`、`part2`配置；快速实验也可使用`linger.const_module`或`linger.quant_module`。详见[混合精度量化、局部约束与效果调优指南](mixed_precision_quantization.md)。
+
 3. **量化ONNX计算图导图接口**
    ```python
    with torch.no_grad():

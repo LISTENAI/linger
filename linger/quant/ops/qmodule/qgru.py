@@ -534,7 +534,10 @@ class QGRU(QModuleMixin, nn.GRU):
             return self.bias_ih_l0, self.bias_hh_l0
         fake_bias_ih = self.biasih_quantizer(self.bias_ih_l0, self.weightih_quantizer.scale * self.input_quantizer.scale)
         fake_bias_hh = self.biashh_quantizer(self.bias_hh_l0, self.weighthh_quantizer.scale * self.hidden_quantizer.scale)
-        return fake_bias_ih, fake_bias_hh
+        return (
+            self._prepare_bias_for_compute(fake_bias_ih, self.weight_ih_l0),
+            self._prepare_bias_for_compute(fake_bias_hh, self.weight_hh_l0),
+        )
     
     @property
     def qbias_ih_hh_reverse(self):
@@ -543,25 +546,29 @@ class QGRU(QModuleMixin, nn.GRU):
                 return self.bias_ih_l0_reverse, self.bias_hh_l0_reverse
             fake_bias_ih_r = self.biasih_reverse_quantizer(self.bias_ih_l0_reverse, self.weightih_reverse_quantizer.scale * self.input_quantizer.scale)
             fake_bias_hh_r = self.biashh_reverse_quantizer(self.bias_hh_l0_reverse, self.weighthh_reverse_quantizer.scale * self.hidden_reverse_quantizer.scale)
-            return fake_bias_ih_r, fake_bias_hh_r
+            return (
+                self._prepare_bias_for_compute(fake_bias_ih_r, self.weight_ih_l0_reverse),
+                self._prepare_bias_for_compute(fake_bias_hh_r, self.weight_hh_l0_reverse),
+            )
         return None, None
 
     def quantize_gru_input(self, input: torch.Tensor) -> torch.Tensor:
         if isinstance(input, QTensor):
             fake_input = from_qtensor_to_tensor(input)
             self.input_quantizer.is_qtensor = True
-            self.input_quantizer.scale.fill_(input.scale.detach())
             self.input_quantizer.data_bits = input.data_bits
+            input_scale = self.input_quantizer._limit_scale(input.scale.detach())
+            self.input_quantizer.scale.fill_(input_scale)
         else:
             fake_input = self.input_quantizer(input) # 前向过程中会更新input_quantizer的scale
-        return fake_input
+        return self._to_compute_dtype(fake_input)
 
     def quantize_gru_hidden(self, hidden: torch.Tensor, direct, scale=None) -> torch.Tensor:
         if direct:
             fake_hidden = self.hidden_reverse_quantizer(hidden, scale)
         else:
             fake_hidden = self.hidden_quantizer(hidden, scale)
-        return fake_hidden.float()
+        return self._to_compute_dtype(fake_hidden)
     
     def quantize_gru_out(self, input: torch.Tensor, direct) -> torch.Tensor:
         if direct:
@@ -681,12 +688,17 @@ class QGRU(QModuleMixin, nn.GRU):
                 hx = self.permute_hidden(hx, sorted_indices)
 
             input = self.quantize_gru_input(input)
+            hx = self._to_compute_dtype(hx)
 
             self.check_forward_args(input, hx, batch_sizes)
 
             flat_weights = []
             w_ih, w_hh = self.qweight_ih_hh
             b_ih, b_hh = self.qbias_ih_hh
+            w_ih = self._to_compute_dtype(w_ih)
+            w_hh = self._to_compute_dtype(w_hh)
+            b_ih = self._prepare_bias_for_compute(b_ih, w_ih)
+            b_hh = self._prepare_bias_for_compute(b_hh, w_hh)
             flat_weights.extend([w_ih, w_hh])
             if self.bias:
                 flat_weights.extend([b_ih, b_hh])
@@ -694,6 +706,10 @@ class QGRU(QModuleMixin, nn.GRU):
             if self.bidirectional:
                 w_ih_r, w_hh_r = self.qweight_ih_hh_reverse
                 b_ih_r, b_hh_r = self.qbias_ih_hh_reverse
+                w_ih_r = self._to_compute_dtype(w_ih_r)
+                w_hh_r = self._to_compute_dtype(w_hh_r)
+                b_ih_r = self._prepare_bias_for_compute(b_ih_r, w_ih_r)
+                b_hh_r = self._prepare_bias_for_compute(b_hh_r, w_hh_r)
                 flat_weights.extend([w_ih_r, w_hh_r])
                 if self.bias:
                     flat_weights.extend([b_ih_r, b_hh_r])
@@ -709,7 +725,8 @@ class QGRU(QModuleMixin, nn.GRU):
             hidden_r = self.quantize_gru_hidden(hidden, 1)
             output = self.quantize_gru_out(output, 0)
             output_r = self.quantize_gru_out(output, 1)
-                
+            output = self._to_transport_dtype(output)
+            hidden = self._to_transport_dtype(hidden)
             output = from_tensor_to_qtensor(output, self.output_quantizer.scale, self.output_quantizer.data_bits)
 
             if isinstance(orig_input, PackedSequence):
@@ -772,13 +789,16 @@ class QGRU(QModuleMixin, nn.GRU):
             if self.bidirectional:
                 self.quantize_gru_hidden(hx[1], 1, None)
 
+        hx = self._to_compute_dtype(hx)
+
         self.check_forward_args(input, hx, batch_sizes)
 
         if batch_sizes is not None:
             output, hidden = self.forward_input_packed(input, hx, batch_sizes)
         else:
             output, hidden = self.forward_input_tensor(input, hx)
-        
+        output = self._to_transport_dtype(output)
+        hidden = self._to_transport_dtype(hidden)
         output = from_tensor_to_qtensor(output, self.output_quantizer.scale, self.output_quantizer.data_bits)
 
         if isinstance(orig_input, PackedSequence):
@@ -847,10 +867,15 @@ class QGRU(QModuleMixin, nn.GRU):
         biashh_quantizer  = self.biashh_quantizer if direct == 0 else self.biashh_reverse_quantizer
         use_exact_runtime = QUANT_CONFIGS.platform in {PlatForm.venus, PlatForm.venusA, PlatForm.arcs, PlatForm.mars}
         exact_runtime_training = use_exact_runtime and self.training
+        high_precision_compute = self._uses_high_precision_compute()
 
         # fake_quant hidden, weight, bias
         weight_ih, weight_hh = self.qweight_ih_hh if direct == 0 else self.qweight_ih_hh_reverse
         bias_ih, bias_hh = self.qbias_ih_hh if direct == 0 else self.qbias_ih_hh_reverse
+        weight_ih = self._to_compute_dtype(weight_ih)
+        weight_hh = self._to_compute_dtype(weight_hh)
+        bias_ih = self._prepare_bias_for_compute(bias_ih, weight_ih)
+        bias_hh = self._prepare_bias_for_compute(bias_hh, weight_hh)
 
         step_outputs = []
         runtime_hidden_scale = float(hidden_quantizer.scale) if exact_runtime_training else None
@@ -867,6 +892,12 @@ class QGRU(QModuleMixin, nn.GRU):
 
             def finalize_output(direction_output, direction_hidden):
                 return direction_output, direction_hidden
+        elif high_precision_compute:
+            def postprocess_hidden(step_hidden):
+                return self._quantize_hidden_step(step_hidden, direct)
+
+            def finalize_output(direction_output, direction_hidden):
+                return self.quantize_gru_out(direction_output, direct), direction_hidden
         else:
             def postprocess_hidden(step_hidden):
                 return self._quantize_hidden_step(step_hidden, direct)

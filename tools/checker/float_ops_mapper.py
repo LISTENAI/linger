@@ -274,8 +274,15 @@ def node_equal(inputs, kwargs):
 
 @register_op(op_type="Squeeze")
 def squeeze(inputs, kwargs):
-    axes = get_param(kwargs, "axes")
+    axes = kwargs.get("axes",None)
     tensor = inputs[0]
+    if axes is None:
+        axes = []
+        for idx, s in enumerate(tensor.shape):
+            if s == 1:
+                axes.append(idx)
+        if len(axes) == 0:
+            raise KeyError("OP Squeeze must have single shape dim !")
     for axis in sorted(axes, reverse=True):
         tensor = tensor.squeeze(axis)
     return tensor

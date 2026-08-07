@@ -93,11 +93,11 @@ class QBatchNorm2d(QModuleMixin, torch.nn.BatchNorm2d):
                 self.running_mean = (
                     (1 - exponential_average_factor) * self.running_mean
                     + exponential_average_factor * mean.squeeze().detach()
-                )
+                ).to(self.running_mean.dtype)
                 self.running_var = (
                     (1 - exponential_average_factor) * self.running_var
                     + exponential_average_factor * var.squeeze().detach()
-                )
+                ).to(self.running_var.dtype)
         else:
             mean = self.running_mean.reshape(1, -1, 1, 1)
             var = self.running_var.reshape(1, -1, 1, 1)
@@ -129,6 +129,8 @@ class QBatchNorm2d(QModuleMixin, torch.nn.BatchNorm2d):
             beta,
             self.weight_quantizer.scale * self.input_quantizer.scale,
         )
+        fake_alpha = self._to_compute_dtype(fake_alpha)
+        fake_beta = self._prepare_bias_for_compute(fake_beta, fake_alpha)
         return fake_alpha, fake_beta
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

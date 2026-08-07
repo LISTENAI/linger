@@ -84,16 +84,21 @@ class QLayerNormFunction(torch.autograd.Function):
         # === 3 reshape back to original
         q_y_normal = q_y_normal.view(input.shape)
         q_y_normal.clamp_(-2**31, 2**31-1)
-        q_output = q_y_normal * q_weight
+        q_output = q_y_normal.long() * q_weight.long()
+        q_output.clamp_(-2**31, 2**31-1)
         if bias is not None:
-            q_bias = bias_quantizer.quant_round(bias * scale_y_normal * scale_w, bias_quantizer.round_mode)
-            q_bias = torch.clamp(q_bias, bias_quantizer.quant_min, bias_quantizer.quant_max)
+            q_bias = bias_quantizer.quant_round(
+                bias.double() * scale_y_normal * scale_w.double(),
+                bias_quantizer.round_mode,
+            )
+            q_bias = torch.clamp(
+                q_bias, bias_quantizer.quant_min, bias_quantizer.quant_max
+            ).long()
         else:
             q_bias = None
         
         q_output = q_output + q_bias
-        q_output.clamp_(-2**31, 2**31-1)
-        outputs = q_output.float() / (scale_y_normal * scale_w)
+        outputs = q_output.double() / (scale_y_normal * scale_w.double())
 
         saved_tensors = []
         if training:
@@ -134,6 +139,12 @@ class QLayerNormFunction(torch.autograd.Function):
 @register_qmodule(CLayerNorm)
 @register_qmodule(torch.nn.LayerNorm)
 class QLayerNorm(QModuleMixin, nn.LayerNorm):
+    @property
+    def axis(self):
+        if isinstance(self.normalized_shape, int):
+            return -1
+        return -len(self.normalized_shape)
+
     @classmethod
     def qcreate(
         cls,
@@ -162,19 +173,29 @@ class QLayerNorm(QModuleMixin, nn.LayerNorm):
     def qbias(self):
         if not hasattr(self, "bias_quantizer") or self.bias is None:
             return self.bias
-        return self.bias_quantizer(
+        fake_bias = self.bias_quantizer(
             self.bias,
             self.weight_quantizer.scale * QLAYERNORM_NORMAL_SCALE,
         )
+        if torch.onnx.is_in_onnx_export():
+            return fake_bias
+        return self._prepare_bias_for_compute(fake_bias, self.weight)
 
     def forward(self, input):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
             return QLayerNormOnnxFunction.apply(input, self.normalized_shape, self.qweight, self.qbias, self.eps, qparam_dict)
         if QUANT_CONFIGS.calibration:
-            return F.layer_norm(input, self.normalized_shape, self.qweight, self.qbias, self.eps)
+            weight, bias = self._get_compute_weight_bias()
+            return F.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
         else:
+            weight = self.qweight
+            bias = self.bias
+            if self._uses_high_precision_compute():
+                weight = weight.double()
+                if bias is not None:
+                    bias = bias.double()
             return QLayerNormFunction.apply(
-                input, self.qweight, self.bias, self.normalized_shape, self.eps,
+                input, weight, bias, self.normalized_shape, self.eps,
                 self.input_quantizer, self.weight_quantizer, self.bias_quantizer, self.training
             )

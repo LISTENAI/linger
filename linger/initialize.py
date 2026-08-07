@@ -48,20 +48,56 @@ def fuse_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, un
             '.weight' not in state_dict, 'load quanted model but contain float clamp params'
 
 @contextmanager
-def calibration():
-    # 保存旧值
-    # old_a_calibrate_name = QUANT_CONFIGS.quant_info.a_calibrate_name
-    # old_w_calibrate_name = QUANT_CONFIGS.quant_info.w_calibrate_name
+def calibration(model=None):
+    """
+    Calibration context manager.
+    支持多轮校准：在calibration上下文中可以多次进行前向传播累积校准数据，
+    退出上下文时自动调用finalize_calibration()计算最终scale。
+
+    Args:
+        model: 量化后的模型（仅支持CWE后的模型）。传入后退出时会自动finalize所有量化器。
+
+    Usage:
+        # 单轮校准
+        with linger.calibration(model_cwe):
+            model_quant = linger.init(model_cwe, config_file=config_path)
+            model_quant.load_state_dict(checkpoint, strict=False)
+            _ = model_quant(calib_inputs)  # 一次性校准
+
+        # 多轮校准（用户无感知，和单轮一样使用）
+        with linger.calibration(model_cwe):
+            model_quant = linger.init(model_cwe, config_file=config_path)
+            model_quant.load_state_dict(checkpoint, strict=False)
+            for batch in calib_loader:
+                model_quant(batch)  # 多次前向，累积数据
+    """
     try:
         QUANT_CONFIGS.calibration = True
-        # QUANT_CONFIGS.quant_info.a_calibrate_name = a_calibrate_name
-        # QUANT_CONFIGS.quant_info.w_calibrate_name = w_calibrate_name
+        if model is not None:
+            # 设置所有量化器的累积模式
+            _set_quantizers_accumulating(model, True)
         yield  # <<< 关键点：控制权交给 with 块
     finally:
         QUANT_CONFIGS.calibration = False
+        # 自动finalize所有量化器
+        if model is not None:
+            from .quant.quantizer import Quantizer
+            for m in model.modules():
+                if isinstance(m, Quantizer):
+                    m.finalize_calibration()
+            _set_quantizers_accumulating(model, False)
+
+
+def _set_quantizers_accumulating(model, value):
+    """设置模型中所有量化器的_is_accumulating标志"""
+    from .quant.quantizer import Quantizer
+    for m in model.modules():
+        if isinstance(m, Quantizer):
+            m._is_accumulating = value
 
 def const_module(module: nn.Module, c_activation_val: float = 8.0, c_weight_val: float = 8.0, c_bias_val = None, c_weight_factor = None):
-    for name, m in module.named_modules():
+    """Override clamp settings recursively on an already constrained subtree."""
+    for _, m in module.named_modules():
         if hasattr(m, 'clamp_weight'):
             m.clamp_weight = c_weight_val
             m.clamp_factor = c_weight_factor
@@ -71,19 +107,26 @@ def const_module(module: nn.Module, c_activation_val: float = 8.0, c_weight_val:
             m.clamp_activation = c_activation_val
 
 def quant_module(module: nn.Module, c_activation_val: float = 8.0, c_weight_val: float = 8.0, c_bias_val = None, c_weight_factor = None, data_bits: int = 8, weight_bits: int = 8, bias_bits: int = 32, out_bits: int = 8):
-    for name, m in module.named_modules():
+    """Override quantizer settings recursively on an already quantized subtree."""
+    for _, m in module.named_modules():
         if hasattr(m, 'input_quantizer') and m.input_quantizer is not None:
-            m.input_quantizer.data_bits = data_bits
+            input_quantizers = (
+                m.input_quantizer
+                if isinstance(m.input_quantizer, nn.ModuleList)
+                else (m.input_quantizer,)
+            )
+            for input_quantizer in input_quantizers:
+                input_quantizer.data_bits = data_bits
         if hasattr(m, 'weight_quantizer') and m.weight_quantizer is not None:
             m.weight_quantizer.data_bits = weight_bits
-            m.weight_quantizer.clamp_weight_value = c_weight_val
-            m.weight_quantizer.clamp_factor_value = c_weight_factor
+            m.weight_quantizer.clamp_value = c_weight_val
+            m.weight_quantizer.clamp_factor = c_weight_factor
         if hasattr(m, 'bias_quantizer') and m.bias_quantizer is not None:
             m.bias_quantizer.data_bits = bias_bits
-            m.bias_quantizer.clamp_bias_value = c_bias_val
+            m.bias_quantizer.clamp_value = c_bias_val
         if hasattr(m, 'output_quantizer') and m.output_quantizer is not None:
             m.output_quantizer.data_bits = out_bits
-            m.output_quantizer.clamp_activation_value = c_activation_val
+            m.output_quantizer.clamp_value = c_activation_val
 
 def _match_part(name: str, mix_parts: list):
     """返回 name 命中的第一个 part，未命中返回 None"""
@@ -295,6 +338,11 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
                 m.output_quantizer.data_bits = output_bits
 
     model.to(q_configs.device)
+
+    # If in calibration mode, set _is_accumulating on all quantizers for multi-round support
+    if QUANT_CONFIGS.calibration:
+        _set_quantizers_accumulating(model, True)
+
     return model
 
 def quant_init(model: nn.Module, config_file: str = None, disable_module=None, disable_submodel=None):

@@ -152,7 +152,7 @@ def gather(inputs, kwargs):
     if not isinstance(inputs[0], QTensor) and inputs[0].dtype != torch.float32 and scale_o is not None:
         inputs[0] = dequant(inputs[0], scale_o)
 
-    if inputs[1].numel() == 1: # example : a = torch.randn([1,3,224,224]); a[:,:,2]
+    if inputs[1].ndim == 0: # example : a = torch.randn([1,3,224,224]); a[:,:,2]
         slice_list = [":"]*inputs[0].ndim
         slice_list[axis] = str(inputs[1].item())
         slice_str = ','.join(slice_list)
@@ -181,6 +181,23 @@ def quant_(inputs, kwargs):
 def dequant_(inputs, kwargs):
     input = inputs[0]
     return input
+
+@register_op(op_type="Requant")
+def requant_(inputs, kwargs):
+    data_bits = kwargs.get('data_bits', 8)
+    scale_x = torch.tensor(kwargs.get('scale_x', 1.0), dtype=torch.float32)
+    o_bits = kwargs.get('o_bits', 8)
+    scale_o = torch.tensor(kwargs.get('scale_o', 1.0), dtype=torch.float32)
+    zp = torch.tensor(kwargs.get('zero_point', 0), dtype=torch.float32)
+    quant_mode = StringToQuantMode(kwargs.get('quant_mode', 'floor_add'))
+
+    input = inputs[0]
+    qinput, _ = quant(input, data_bits, scale_x, zp, quant_mode)
+    input = dequant(qinput, scale_x)
+    out_qinput, _ = quant(input, o_bits, scale_o, zp, quant_mode)
+    out_input = dequant(out_qinput, scale_o)
+    return from_tensor_to_qtensor(out_input, scale_o, o_bits, zp)
+
 
 @register_op(op_type=['QBmm', 'BmmInt'])
 def bmmint(inputs, kwargs):
@@ -236,14 +253,31 @@ def maxpool2d(inputs, kwargs):
 
     kernel_size = tuple(kwargs.get('kernel_shape', None))
     pads = kwargs.get('pads', None)
+    need_asymmetric_pad = False
+
     if pads is not None:
-        pads = tuple(pads[0:2])
+        # ONNX pads format: [h_begin, w_begin, h_end, w_end]
+        if pads[0] == pads[2] and pads[1] == pads[3]:
+            # Symmetric padding, e.g. [0,0,0,0] -> (0,0), [1,2,1,2] -> (1,2)
+            pads = (pads[0], pads[1])
+        else:
+            # Asymmetric padding, need to pad manually
+            need_asymmetric_pad = True
+            pads = (0, 0)
     else:
         pads = (0, 0)
+    
     strides = get_param(kwargs,'strides')
     dilations = tuple(kwargs.get('dilations', (1, 1)))
     ceil_mode = bool(kwargs.get('ceil_mode',False))
     device = input.device
+
+    if need_asymmetric_pad:
+        attr_pads = kwargs.get('pads', None)
+        # scale = input.scale
+        # data_bits = input.data_bits
+        input = F.pad(input, (attr_pads[0], attr_pads[2], attr_pads[1], attr_pads[3]), mode="constant", value=-float("inf"))
+        # input = from_tensor_to_qtensor(input, scale, data_bits, 0)
 
     module = nn.MaxPool2d(kernel_size, strides, pads, dilations, False, ceil_mode)
 
@@ -262,6 +296,22 @@ def iqadd(inputs, kwargs):
     if input_0.dtype != torch.float32 or input_1.dtype != torch.float32:
         input_0, input_1 = load_binary_quantized_weights(instance, kwargs, input_0, input_1)
     return instance(input_0, input_1)
+
+@register_op(op_type=['QVar', 'iqVar'])
+def iqvar(inputs, kwargs):
+    input_len = len(inputs)
+    assert input_len == 1, 'The inputs number of iqVar is wrong'
+    input_0 = inputs[0]
+    kwargs = canonicalize_attrs(kwargs)
+
+    dim = kwargs.get('dims', -1)
+    unbiased = kwargs.get('unbiased', True)
+    keepdim = kwargs.get('keepdim', True)
+
+    instance = create_qmodule_tensor(QVar, None, 1, kwargs)
+    if input_0.dtype != torch.float32:
+        input_0 = load_quantized_weights(instance, kwargs, input_0)
+    return instance(input_0, dim, unbiased, keepdim)
 
 # @register_op(op_type='iqDiv')
 # def iqdiv(inputs, kwargs):
@@ -293,7 +343,7 @@ def iqmul(inputs, kwargs):
 
     instance = create_qmodule_tensor(QMul, None, 2, kwargs)
     qx, qy = x, y
-    if x.dtype != torch.float32 or y.dtype != torch.float32:
+    if (x.dtype != torch.float32 and x.dtype != torch.float64) or (y.dtype != torch.float32 and y.dtype != torch.float64):
         qx, qy = load_binary_quantized_weights(instance, kwargs, x, y)
     res = instance(qx, qy)
     
@@ -411,7 +461,7 @@ def matmulint(inputs, kwargs):
 
 @register_op(op_type=['QBatchNorm2d', 'BatchNorm2dInt'])
 def batchnorm2dInt(inputs, kwargs):
-    input, weights, bias = inputs
+    input, weights, bias, *_ = inputs
     kwargs = canonicalize_attrs(kwargs)
 
     num_features = input.shape[1]

@@ -13,6 +13,7 @@ from .qtanh import QTanh
 from .qgelu import QGelu
 from .qswish import QSwish
 from .qsoftmax import QSoftmax
+from .iqvar import QVar
 from .qsqueeze import QSqueezeOnnxFunction
 from ..qconfig import *
 from ...qtensor import QTensor, from_tensor_to_qtensor, from_qtensor_to_tensor, qfallback
@@ -49,6 +50,27 @@ def add(op, input, other):
         q_layer = q_layer.to(input.device)
         setattr(module_self, var_name, q_layer)
     output = q_layer(input, other)
+    return output
+
+@register_qtensor_op([torch.var, torch.Tensor.var])
+def var(op, input, dim=None, unbiased=True, keepdim=False):
+    module_self = get_current_module()
+    if module_self is None:
+        return qfallback(op, input, dim, unbiased, keepdim)
+
+    iname_index = getattr(module_self, LINGER_QTENSOR_LAYER_COUNTER)
+    setattr(module_self, LINGER_QTENSOR_LAYER_COUNTER, iname_index+1)
+    var_name = LINGER_QTENSOR_LAYERS_PREIFX + '_iqvar_' + str(iname_index)
+
+    q_layer = None
+    if hasattr(module_self, var_name):
+        q_layer = getattr(module_self, var_name)
+    else:
+        q_layer = QVar(activate_config=QUANT_CONFIGS.quant_info.to_dict(), num_input=1, dim=dim, unbiased=unbiased, keepdim=keepdim)
+        q_layer.train(module_self.training)
+        q_layer = q_layer.to(input.device)
+        setattr(module_self, var_name, q_layer)
+    output = q_layer(input, dim, unbiased, keepdim)
     return output
 
 # @register_qtensor_op([torch.ops.aten.mul, torch.ops.aten.mul_])

@@ -116,48 +116,52 @@ class QSparifyFFN(QModuleMixin, SparifyFFN):
         if self.bias_fc1_quantizer is None:
             return self.bias_fc1
         fake_bias = self.bias_fc1_quantizer(self.bias_fc1, self.weight_fc1_quantizer.scale * self.input_quantizer.scale)
-        return fake_bias
+        return self._prepare_bias_for_compute(fake_bias, self.weight_fc1)
     
     @property
     def qbias_fc2(self):
         if self.bias_fc2_quantizer is None:
             return self.bias_fc2
         fake_bias = self.bias_fc2_quantizer(self.bias_fc2, self.weight_fc2_quantizer.scale * self.outfc1_quantizer.scale)
-        return fake_bias
+        return self._prepare_bias_for_compute(fake_bias, self.weight_fc2)
 
     @property
     def qbias_mask(self):
         if self.bias_mask_quantizer is None:
             return self.bias_mask
         fake_bias = self.bias_mask_quantizer(self.bias_mask, self.weight_mask_quantizer.scale * self.input_quantizer.scale)
-        return fake_bias
+        return self._prepare_bias_for_compute(fake_bias, self.weight_mask)
     
     def quantize_outL(self, input: torch.Tensor) -> torch.Tensor:
         if isinstance(input, QTensor):
             fake_input = from_qtensor_to_tensor(input)
-            self.outfc1_quantizer.scale.fill_(input.scale.detach())
             self.outfc1_quantizer.data_bits = input.data_bits
+            self.outfc1_quantizer.scale.fill_(self.outfc1_quantizer._limit_scale(input.scale.detach()))
         else:
             fake_input = self.outfc1_quantizer(input) # 前向过程中会更新input_quantizer的scale
-        return fake_input
+        return self._to_compute_dtype(fake_input)
     
     def quantize_outM(self, input: torch.Tensor) -> torch.Tensor:
         if isinstance(input, QTensor):
             fake_input = from_qtensor_to_tensor(input)
-            self.outmask_quantizer.scale.fill_(input.scale.detach())
             self.outmask_quantizer.data_bits = input.data_bits
+            self.outmask_quantizer.scale.fill_(self.outmask_quantizer._limit_scale(input.scale.detach()))
         else:
             fake_input = self.outmask_quantizer(input) # 前向过程中会更新input_quantizer的scale
-        return fake_input
+        return self._to_compute_dtype(fake_input)
 
     def forward(self, input):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
             return QSparifyFFNFunction.apply(input, self.weight_fc1, self.weight_fc2, self.bias_fc1, self.bias_fc2, self.weight_mask, self.bias_mask, qparam_dict)
-        outL0 = F.linear(input, self.qweight_fc1, self.qbias_fc1)
+        weight_fc1 = self._to_compute_dtype(self.qweight_fc1)
+        bias_fc1 = self._prepare_bias_for_compute(self.qbias_fc1, weight_fc1)
+        outL0 = F.linear(input, weight_fc1, bias_fc1)
         outL = self.quantize_outL(outL0)
 
-        outM = F.linear(input, self.qweight_mask, self.qbias_mask)
+        weight_mask = self._to_compute_dtype(self.qweight_mask)
+        bias_mask = self._prepare_bias_for_compute(self.qbias_mask, weight_mask)
+        outM = F.linear(input, weight_mask, bias_mask)
         outM = self.quantize_outM(outM)
         outM = torch.softmax(outM, dim=-1)
 
@@ -166,7 +170,8 @@ class QSparifyFFN(QModuleMixin, SparifyFFN):
         out1 = outL * outM2 # 浮点Tensor类型计算,相当于mask操作，不能走进qmul
 
         out2 = F.relu(out1)
-        out = F.linear(out2, self.qweight_fc2, self.qbias_fc2)
+        weight_fc2 = self._to_compute_dtype(self.qweight_fc2)
+        bias_fc2 = self._prepare_bias_for_compute(self.qbias_fc2, weight_fc2)
+        out = F.linear(out2, weight_fc2, bias_fc2)
 
         return out
-

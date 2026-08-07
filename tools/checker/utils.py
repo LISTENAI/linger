@@ -243,17 +243,17 @@ def load_binary_quantized_weights(q_instance, attrs, input_0, input_1):
     scale_y = attrs.get('scale_y', None)
     
     dequant_input0 = input_0
-    if input_0.dtype != torch.float32 and scale_x is not None:
+    if (input_0.dtype != torch.float32 and input_0.dtype != torch.float64) and scale_x is not None:
         dequant_input0 = dequant(input_0, scale_x)
         
     dequant_input1 = input_1
-    if input_1.dtype != torch.float32 and scale_y is not None:
+    if (input_1.dtype != torch.float32 and input_1.dtype != torch.float64) and scale_y is not None:
         dequant_input1 = dequant(input_1, scale_y)
         
     return dequant_input0, dequant_input1
 
 def load_rnn_quantized_weights(q_instance, attrs, weight_ih, weight_hh, bias_ih, bias_hh):
-    scale_x = attrs.get('scale_x', None)
+    scale_x = attrs.get('scale_x', attrs.get('scale_i', None))
     scale_h = attrs.get('scale_h', None)
     scale_iw = attrs.get('scale_iw', None)
     scale_hw = attrs.get('scale_hw', None)

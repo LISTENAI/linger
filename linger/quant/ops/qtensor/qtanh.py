@@ -43,17 +43,6 @@ def tanh_requant_to_qbits(value, src_q_bits, q_bits):
     return q.clamp(quant_min, quant_max)
 
 
-def _fixed_scale_fake_quant(output, quantizer, out_scale):
-    if quantizer.data_bits <= 24:
-        return quantizer(output, out_scale)
-
-    scale = torch.tensor(float(1 << (quantizer.data_bits - 1)), dtype=torch.float64, device=output.device)
-    output_int = quantizer.quant_round(output.to(torch.float64) * scale, quantizer.round_mode)
-    output_int = output_int.clamp(quantizer.quant_min, quantizer.quant_max)
-    quantizer.scale.fill_(float(scale))
-    return output_int / scale
-
-
 class QTanhOnnxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, qparam_dict = None):
@@ -88,7 +77,7 @@ class QTanhFunction(torch.autograd.Function):
                 x_q11 = (quant_x * pow(2, l_scale) + 0.5).floor().int()
             output_q15 = lingerext.venus_qtanh_forward(x_q11.contiguous())
             # 转换为浮点数 (Q15 -> float)
-            output = output_q15.float() / (1 << 15)
+            output = output_q15.double() / (1 << 15)
         else:
             # 转换为Q27格式的int32
             l_scale = 27 - int(math.log2(scale_x.data))
@@ -111,8 +100,7 @@ class QTanhFunction(torch.autograd.Function):
                 tanh_runtime_qbits(QUANT_CONFIGS.platform),
                 output_q_bits,
             )
-            output_dtype = torch.float64 if output_bits is not None and output_q_bits > 24 else torch.float32
-            return output_q.to(output_dtype) / float(1 << output_q_bits)
+            return output_q.double() / float(1 << output_q_bits)
         
         return output
 
@@ -145,12 +133,13 @@ class QTanh(QModuleTensor):
         )
 
     def quantize_output(self, module, input, output):
+        output = self._to_transport_dtype(output)
         if (
             not torch.onnx.is_in_onnx_export()
             and QUANT_CONFIGS.platform in RUNTIME_TANH_PLATFORMS
         ):
             out_scale = torch.tensor(1 << (self.output_quantizer.data_bits - 1), dtype=torch.float32, device=output.device)
-            fake_output = _fixed_scale_fake_quant(output, self.output_quantizer, out_scale)
+            fake_output = self.output_quantizer(output, out_scale)
             return from_tensor_to_qtensor(fake_output, self.output_quantizer.scale, self.output_quantizer.data_bits)
         return super().quantize_output(module, input, output)
     

@@ -90,13 +90,13 @@ class QConvTranspose1d(QModuleMixin, torch.nn.ConvTranspose1d):
         if torch.onnx.is_in_onnx_export():
             qparam_dict = generate_onnx_qparam_dict(self, False)
             return QConvTranspose1dOnnxFunction.apply(input, self.qweight, self.qbias, self.stride, self.padding, self.output_padding, self.groups, self.dilation, qparam_dict)
+        weight, bias = self._get_compute_weight_bias()
         return F.conv_transpose1d(
             input, 
-            self.qweight, 
-            self.qbias,
+            weight,
+            bias,
             self.stride,
             self.padding,
             self.output_padding,
             self.groups,
             self.dilation,)
-

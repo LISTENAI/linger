@@ -50,8 +50,8 @@ class QAvgPool2d(QModuleMixin, nn.AvgPool2d):
         _kernel_size = module.kernel_size
         _stride = module.stride
         qmodule = cls(
-            kernel_size=_kernel_size if _kernel_size is None else None,
-            stride=_stride if _stride is None else None,
+            kernel_size=None,
+            stride=None,
             padding = module.padding,
             ceil_mode = module.ceil_mode,
             count_include_pad = module.count_include_pad,
@@ -138,5 +138,6 @@ class QAvgPool2d(QModuleMixin, nn.AvgPool2d):
         )
         if self.training:
             aligned_out = ref_out + (aligned_out - ref_out).detach()
+        aligned_out = self._to_transport_dtype(aligned_out)
         return from_tensor_to_qtensor(aligned_out, self.output_quantizer.scale, self.output_quantizer.data_bits)
         
