@@ -516,8 +516,8 @@ class QLSTM(QModuleMixin, nn.LSTM):
     def qbias_ih_hh(self):
         if self.biasih_quantizer is None:
             return self.bias_ih_l0, self.bias_hh_l0
-        fake_bias_ih = self.biasih_quantizer(self.bias_ih_l0, self.weightih_quantizer.scale * self.input_quantizer.scale)
-        fake_bias_hh = self.biashh_quantizer(self.bias_hh_l0, self.weighthh_quantizer.scale * self.hidden_quantizer.scale)
+        fake_bias_ih = self.biasih_quantizer(self.bias_ih_l0, self._bias_scale(self.weightih_quantizer.scale, self.input_quantizer.scale))
+        fake_bias_hh = self.biashh_quantizer(self.bias_hh_l0, self._bias_scale(self.weighthh_quantizer.scale, self.hidden_quantizer.scale))
         return (
             self._prepare_bias_for_compute(fake_bias_ih, self.weight_ih_l0),
             self._prepare_bias_for_compute(fake_bias_hh, self.weight_hh_l0),
@@ -528,8 +528,8 @@ class QLSTM(QModuleMixin, nn.LSTM):
         if self.bidirectional:
             if self.biasih_quantizer is None:
                 return self.bias_ih_l0_reverse, self.bias_hh_l0_reverse
-            fake_bias_ih_r = self.biasih_reverse_quantizer(self.bias_ih_l0_reverse, self.weightih_reverse_quantizer.scale * self.input_quantizer.scale)
-            fake_bias_hh_r = self.biashh_reverse_quantizer(self.bias_hh_l0_reverse, self.weighthh_reverse_quantizer.scale * self.hidden_reverse_quantizer.scale)
+            fake_bias_ih_r = self.biasih_reverse_quantizer(self.bias_ih_l0_reverse, self._bias_scale(self.weightih_reverse_quantizer.scale, self.input_quantizer.scale))
+            fake_bias_hh_r = self.biashh_reverse_quantizer(self.bias_hh_l0_reverse, self._bias_scale(self.weighthh_reverse_quantizer.scale, self.hidden_reverse_quantizer.scale))
             return (
                 self._prepare_bias_for_compute(fake_bias_ih_r, self.weight_ih_l0_reverse),
                 self._prepare_bias_for_compute(fake_bias_hh_r, self.weight_hh_l0_reverse),

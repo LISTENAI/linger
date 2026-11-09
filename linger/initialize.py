@@ -255,7 +255,7 @@ def init(model: nn.Module, config_file: str = None, disable_module=None, disable
                 module._parameters.items(), module._buffers.items())
             local_state = {k: v for k, v in local_name_params if v is not None}
             for key in state_dict.keys():
-                if LINGER_QTENSOR_LAYERS_PREIFX in key:
+                if LINGER_QTENSOR_LAYERS_PREIFX in key or LINGER_QTENSOR_CONCAT_LAYERS_PREIFX in key:
                     if key.startswith(prefix):
                         full_input_name = key[len(prefix):]
                         # get the name of param/buffer/child

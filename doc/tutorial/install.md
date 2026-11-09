@@ -144,7 +144,7 @@ root@66d80f4aaf1e:/LISTENAI#
 ### 1. linger安装
 ```bash
 git clone https://github.com/LISTENAI/linger.git
-cd linger && sh install.sh
+cd linger && LINGER_CPU_ONLY=0 sh install.sh
 ```
 
 **注意：** 安装过程中会在线编译c++/cuda代码，时间较长。

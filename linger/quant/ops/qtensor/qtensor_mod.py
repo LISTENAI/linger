@@ -122,8 +122,10 @@ class QModuleTensor(torch.nn.Module):
         input: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        output = self._to_transport_dtype(output)
+        if not self._uses_high_precision_compute():
+            output = self._to_transport_dtype(output)
         fake_output = self.output_quantizer(output)
+        fake_output = self._to_transport_dtype(fake_output)
         return from_tensor_to_qtensor(fake_output, self.output_quantizer.scale, self.output_quantizer.data_bits)
     
     @classmethod

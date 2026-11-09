@@ -330,8 +330,8 @@ class QGRUCell(nn.Module):
 
     def _forward_venusa_exact(self, input_x, hidden, weight_ih, weight_hh, bias_ih, bias_hh,
                               input_quantizer, hidden_quantizer, weightih_quantizer, weighthh_quantizer):
-        scale_gi = input_quantizer.scale * weightih_quantizer.scale
-        scale_gh = hidden_quantizer.scale * weighthh_quantizer.scale
+        scale_gi = self._bias_scale(input_quantizer.scale, weightih_quantizer.scale)
+        scale_gh = self._bias_scale(hidden_quantizer.scale, weighthh_quantizer.scale)
         q_ib = scale_to_bits(scale_gi)
         q_hb = scale_to_bits(scale_gh)
         max_b_q = max(q_ib, q_hb)
@@ -532,8 +532,8 @@ class QGRU(QModuleMixin, nn.GRU):
     def qbias_ih_hh(self):
         if self.biasih_quantizer is None:
             return self.bias_ih_l0, self.bias_hh_l0
-        fake_bias_ih = self.biasih_quantizer(self.bias_ih_l0, self.weightih_quantizer.scale * self.input_quantizer.scale)
-        fake_bias_hh = self.biashh_quantizer(self.bias_hh_l0, self.weighthh_quantizer.scale * self.hidden_quantizer.scale)
+        fake_bias_ih = self.biasih_quantizer(self.bias_ih_l0, self._bias_scale(self.weightih_quantizer.scale, self.input_quantizer.scale))
+        fake_bias_hh = self.biashh_quantizer(self.bias_hh_l0, self._bias_scale(self.weighthh_quantizer.scale, self.hidden_quantizer.scale))
         return (
             self._prepare_bias_for_compute(fake_bias_ih, self.weight_ih_l0),
             self._prepare_bias_for_compute(fake_bias_hh, self.weight_hh_l0),
@@ -544,8 +544,8 @@ class QGRU(QModuleMixin, nn.GRU):
         if self.bidirectional:
             if self.biasih_quantizer is None:
                 return self.bias_ih_l0_reverse, self.bias_hh_l0_reverse
-            fake_bias_ih_r = self.biasih_reverse_quantizer(self.bias_ih_l0_reverse, self.weightih_reverse_quantizer.scale * self.input_quantizer.scale)
-            fake_bias_hh_r = self.biashh_reverse_quantizer(self.bias_hh_l0_reverse, self.weighthh_reverse_quantizer.scale * self.hidden_reverse_quantizer.scale)
+            fake_bias_ih_r = self.biasih_reverse_quantizer(self.bias_ih_l0_reverse, self._bias_scale(self.weightih_reverse_quantizer.scale, self.input_quantizer.scale))
+            fake_bias_hh_r = self.biashh_reverse_quantizer(self.bias_hh_l0_reverse, self._bias_scale(self.weighthh_reverse_quantizer.scale, self.hidden_reverse_quantizer.scale))
             return (
                 self._prepare_bias_for_compute(fake_bias_ih_r, self.weight_ih_l0_reverse),
                 self._prepare_bias_for_compute(fake_bias_hh_r, self.weight_hh_l0_reverse),

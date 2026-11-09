@@ -5,17 +5,28 @@ from ....onnx import generate_onnx_qparam_dict, quant_qtensor_symbolic_input, QD
 
 class QVarOnnxFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, dim, unbiased, keepdim, qparam_dict=None):
-        return torch.var(x, dim, unbiased, keepdim)
+    def forward(ctx, x, qparam_dict=None):
+        dim = qparam_dict["dims_i"]
+        unbiased = qparam_dict["unbiased_i"]
+        keepdim = qparam_dict["keepdim_i"]
+        if torch.is_tensor(dim):
+            dim = int(dim.item())
+        if torch.is_tensor(unbiased):
+            unbiased = bool(unbiased.item())
+        if torch.is_tensor(keepdim):
+            keepdim = bool(keepdim.item())
+        return torch.var(
+            x,
+            dim,
+            unbiased,
+            keepdim,
+        )
 
     @staticmethod
-    def symbolic(g, x, dim, unbiased, keepdim, qparam_dict=None):
+    def symbolic(g, x, qparam_dict=None):
         op_type = qparam_dict.get("op_type", "QGeneric")
         node_name = f"{QDOMAIN_NAME}::{op_type}"
         qparam_dict.pop('op_type', None)
-        qparam_dict['dims_i'] = dim
-        qparam_dict['unbiased_i'] = unbiased
-        qparam_dict['keepdim_i'] = keepdim
         input_list = [
             quant_qtensor_symbolic_input(g, x, qparam_dict, 0),
         ]
@@ -59,8 +70,5 @@ class QVar(QModuleTensor):
             qparam_dict['dims_i'] = dim
             qparam_dict['unbiased_i'] = unbiased
             qparam_dict['keepdim_i'] = keepdim
-            return QVarOnnxFunction.apply(x, dim, unbiased, keepdim, qparam_dict)
-        elif self.training:
-            self.output_quantizer.min_scale = self.input_quantizer[0].scale
-        else:
-            return torch.var(x, dim, unbiased, keepdim)
+            return QVarOnnxFunction.apply(x, qparam_dict)
+        return torch.var(x, dim, unbiased, keepdim)

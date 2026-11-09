@@ -160,39 +160,41 @@ torch::Tensor qlayernorm_kernel_forward(torch::Tensor numerator, torch::Tensor d
 
 
 
-std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(torch::Tensor input,int bit,float factor,float scale_min, float quant_min,float quant_max);
+std::tuple<torch::Tensor, torch::Tensor, double> fake_quant_cuda(torch::Tensor input,int bit,double factor,double scale_min, double quant_min,double quant_max, int64_t round_mode);
 
-std::tuple<torch::Tensor, torch::Tensor, float> fake_quant(
+std::tuple<torch::Tensor, torch::Tensor, double> fake_quant(
     torch::Tensor input,
     int bit,
-    float factor,
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double factor,
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     // return fake_quant_cuda(input, bit, factor, quant_min, quant_max);
     // printf("到位置 1 了 \n");
     if (input.device().type() == torch::kCUDA){
-        return fake_quant_cuda(input, bit, factor, scale_min, quant_min, quant_max);
+        return fake_quant_cuda(input, bit, factor, scale_min, quant_min, quant_max, round_mode);
     }
     else{
         throw std::runtime_error("尚未实现cpu版本伪量化，请使用python版本——NATIVE模式");
     }
 }
 
-std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(torch::Tensor input,int bit,float scale,float scale_min, float quant_min,float quant_max);
+std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(torch::Tensor input,int bit,double scale,double scale_min, double quant_min,double quant_max, int64_t round_mode);
 
 
 std::tuple<torch::Tensor, torch::Tensor> bias_quant(
     torch::Tensor input,
     int bit,
-    float scale,
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double scale,
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     // return bias_quant_cuda(input, bit, scale, quant_min, quant_max);
     // printf("到位置 1 了 \n");
     if (input.device().type() == torch::kCUDA){
-        return bias_quant_cuda(input, bit, scale, scale_min, quant_min, quant_max);
+        return bias_quant_cuda(input, bit, scale, scale_min, quant_min, quant_max, round_mode);
     }
     else{
         throw std::runtime_error("尚未实现cpu版本伪量化，请使用python版本——NATIVE模式");
@@ -201,36 +203,38 @@ std::tuple<torch::Tensor, torch::Tensor> bias_quant(
 
 
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,float> fake_quant_cuda_with_grad_scale(torch::Tensor input,int bit,float factor,float scale_min, float quant_min,float quant_max);
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,float> fake_quant_with_grad_scale(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,double> fake_quant_cuda_with_grad_scale(torch::Tensor input,int bit,double factor,double scale_min, double quant_min,double quant_max, int64_t round_mode);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,double> fake_quant_with_grad_scale(
     torch::Tensor input,
     int bit,
-    float factor,
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double factor,
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     // return fake_quant_cuda(input, bit, factor, quant_min, quant_max);
     // printf("到位置 1 了 \n");
     if (input.device().type() == torch::kCUDA){
-        return fake_quant_cuda_with_grad_scale(input, bit, factor, scale_min, quant_min, quant_max);
+        return fake_quant_cuda_with_grad_scale(input, bit, factor, scale_min, quant_min, quant_max, round_mode);
     }
     else{
         throw std::runtime_error("尚未实现cpu版本伪量化，请使用python版本——NATIVE模式");
     }
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(torch::Tensor input,int bit,float scale,float scale_min, float quant_min,float quant_max);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(torch::Tensor input,int bit,double scale,double scale_min, double quant_min,double quant_max, int64_t round_mode);
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_with_grad_scale(
     torch::Tensor input,
     int bit,
-    float scale,
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double scale,
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     // return bias_quant_cuda(input, bit, scale, quant_min, quant_max);
     // printf("到位置 1 了 \n");
     if (input.device().type() == torch::kCUDA){
-        return bias_quant_cuda_with_grad_scale(input, bit, scale, scale_min, quant_min, quant_max);
+        return bias_quant_cuda_with_grad_scale(input, bit, scale, scale_min, quant_min, quant_max, round_mode);
     }
     else{
         throw std::runtime_error("尚未实现cpu版本伪量化，请使用python版本——NATIVE模式");
@@ -255,22 +259,22 @@ torch::Tensor venusa_qsoftmax_gpu(const torch::Tensor& in, int64_t dim) { throw 
 torch::Tensor arcs_qsoftmax_gpu(const torch::Tensor& in, int64_t dim) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
 torch::Tensor qlayernorm_kernel_gpu(torch::Tensor numerator, torch::Tensor denominator, float scale_x) { throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable."); }
 
-std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(torch::Tensor input,int bit,float factor,float scale_min, float quant_min,float quant_max)
+std::tuple<torch::Tensor, torch::Tensor, double> fake_quant_cuda(torch::Tensor input,int bit,double factor,double scale_min, double quant_min,double quant_max, int64_t round_mode)
 {
     throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
 }
 
-std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(torch::Tensor input,int bit,float scale,float scale_min, float quant_min,float quant_max)
+std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(torch::Tensor input,int bit,double scale,double scale_min, double quant_min,double quant_max, int64_t round_mode)
 {
     throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,float> fake_quant_cuda_with_grad_scale(torch::Tensor input,int bit,float factor,float scale_min, float quant_min,float quant_max)
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,double> fake_quant_cuda_with_grad_scale(torch::Tensor input,int bit,double factor,double scale_min, double quant_min,double quant_max, int64_t round_mode)
 {
     throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(torch::Tensor input,int bit,float scale,float scale_min, float quant_min,float quant_max)
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(torch::Tensor input,int bit,double scale,double scale_min, double quant_min,double quant_max, int64_t round_mode)
 {
     throw std::runtime_error("lingerext was built in CPU-only mode; CUDA is unavailable.");
 }

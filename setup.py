@@ -56,7 +56,7 @@ else:
 
 setup(
     name="linger",
-    version="3.1.0",
+    version="3.1.1",
     description="linger is package of fix training",
     author="ListenAI",
     ext_modules=[

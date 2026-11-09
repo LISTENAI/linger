@@ -8,6 +8,11 @@ LINGER = '_linger'
 
 LINGER_QTENSOR_LAYER_COUNTER = LINGER+"_qtensor_index_"
 LINGER_QTENSOR_LAYERS_PREIFX = LINGER+'_qtensor'
+# ``cat`` creates helper modules while traversing a QTensor graph.  Keep its
+# counter and state-dict namespace separate from ordinary QTensor operators so
+# two independently-created helpers cannot overwrite one another.
+LINGER_QTENSOR_CONCAT_LAYER_COUNTER = LINGER+"_concat_qtensor_index_"
+LINGER_QTENSOR_CONCAT_LAYERS_PREIFX = LINGER+'_concat_qtensor'
 
 self_module = []
 
@@ -19,12 +24,14 @@ def get_current_module():
 
 def hook_pre_forward(module, input):
     setattr(module, LINGER_QTENSOR_LAYER_COUNTER, 0)
+    setattr(module, LINGER_QTENSOR_CONCAT_LAYER_COUNTER, 0)
     self_module.append(module)
 
 def hook_forward(module, input, output):
     cur = self_module.pop()
     assert cur == module
     setattr(module, LINGER_QTENSOR_LAYER_COUNTER, 0)
+    setattr(module, LINGER_QTENSOR_CONCAT_LAYER_COUNTER, 0)
 
 
 _QMODULE_TABLE = {}
@@ -111,6 +118,6 @@ def quantize_tensor(
         return qcls.from_module(module, activate_cfg, *args, **kwargs)
     return None
 
-__all__ = ["_QMODULE_TABLE", "_QTENSOR_OP_TABLE", "LINGER_QTENSOR_LAYER_COUNTER", "LINGER_QTENSOR_LAYERS_PREIFX", \
+__all__ = ["_QMODULE_TABLE", "_QTENSOR_OP_TABLE", "LINGER_QTENSOR_LAYER_COUNTER", "LINGER_QTENSOR_CONCAT_LAYER_COUNTER", "LINGER_QTENSOR_LAYERS_PREIFX", "LINGER_QTENSOR_CONCAT_LAYERS_PREIFX", \
            "get_current_module", "hook_pre_forward", "hook_forward", "register_qmodule", "register_qtensor_op", \
             "get_qmodule_op", "get_qtensor_op_dispatch", "quantize_module", "quantize_tensor"]

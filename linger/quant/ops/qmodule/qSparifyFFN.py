@@ -115,21 +115,21 @@ class QSparifyFFN(QModuleMixin, SparifyFFN):
     def qbias_fc1(self):
         if self.bias_fc1_quantizer is None:
             return self.bias_fc1
-        fake_bias = self.bias_fc1_quantizer(self.bias_fc1, self.weight_fc1_quantizer.scale * self.input_quantizer.scale)
+        fake_bias = self.bias_fc1_quantizer(self.bias_fc1, self._bias_scale(self.weight_fc1_quantizer.scale, self.input_quantizer.scale))
         return self._prepare_bias_for_compute(fake_bias, self.weight_fc1)
     
     @property
     def qbias_fc2(self):
         if self.bias_fc2_quantizer is None:
             return self.bias_fc2
-        fake_bias = self.bias_fc2_quantizer(self.bias_fc2, self.weight_fc2_quantizer.scale * self.outfc1_quantizer.scale)
+        fake_bias = self.bias_fc2_quantizer(self.bias_fc2, self._bias_scale(self.weight_fc2_quantizer.scale, self.outfc1_quantizer.scale))
         return self._prepare_bias_for_compute(fake_bias, self.weight_fc2)
 
     @property
     def qbias_mask(self):
         if self.bias_mask_quantizer is None:
             return self.bias_mask
-        fake_bias = self.bias_mask_quantizer(self.bias_mask, self.weight_mask_quantizer.scale * self.input_quantizer.scale)
+        fake_bias = self.bias_mask_quantizer(self.bias_mask, self._bias_scale(self.weight_mask_quantizer.scale, self.input_quantizer.scale))
         return self._prepare_bias_for_compute(fake_bias, self.weight_mask)
     
     def quantize_outL(self, input: torch.Tensor) -> torch.Tensor:

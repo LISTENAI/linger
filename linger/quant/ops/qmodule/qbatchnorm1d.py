@@ -139,7 +139,7 @@ class QBatchNorm1d(QModuleMixin, torch.nn.BatchNorm1d):
         fake_alpha = self.weight_quantizer(alpha)
         fake_beta = self.bias_quantizer(
             beta,
-            self.weight_quantizer.scale * self.input_quantizer.scale,
+            self._bias_scale(self.weight_quantizer.scale, self.input_quantizer.scale),
         )
         fake_alpha = self._to_compute_dtype(fake_alpha)
         fake_beta = self._prepare_bias_for_compute(fake_beta, fake_alpha)

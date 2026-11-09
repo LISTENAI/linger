@@ -235,7 +235,11 @@ def get_best_pow2coef_W(w, bit):
         q_w = fake_quant(w, scale[i])
         score.append( (w - q_w).norm() )
     
-    return (torch.tensor(scale[score.index(min(score))])).log2().to("cuda") + bit - 1
+    # Keep the candidate exponent in the input precision.  Constructing the
+    # scalar with the default FP32 dtype would move an FP64 half-exponent tie
+    # before the quantizer can apply its high-precision rounding rule.
+    scale_dtype = torch.float64 if w.is_floating_point() and w.dtype == torch.float64 else torch.float32
+    return torch.tensor(scale[score.index(min(score))], dtype=scale_dtype, device=w.device).log2() + bit - 1
 
 
 
@@ -295,13 +299,20 @@ def histogram_init(self, tensor, *args):
             start_bin=128
         )
 
-        # 将 scale 转换为 log2 格式存储
-        self.running_data.fill_(scale.log2().clamp(min=-24, max=24))
+        # Compute the logarithm in the same precision as high-precision QAT.
+        scale_log2 = torch.as_tensor(
+            scale,
+            dtype=torch.float64 if self._is_high_precision() else torch.float32,
+            device=self.scale.device,
+        ).log2()
+        self.running_data.fill_(scale_log2.clamp(min=-24, max=24))
 
         running_data = self.data_bits - 1 - self.running_data.squeeze(0)
-        running_data = self.quant_round(running_data, self.round_mode)
+        running_data = self._limit_scale_exponent(
+            self.quant_round(running_data, self.round_mode)
+        )
         scale = torch.exp2(running_data)
-        self.scale = scale.clamp(min=1e-6, max=2**24)
+        self.scale.fill_(float(self._limit_scale(scale)))
         self.is_calibrate.fill_(True)
 
 @register_calibrate_method('w_like')
@@ -421,11 +432,18 @@ def _finalize_histogram(self, *args):
     scale = best_amax / nbins
 
     # 设置最终scale
-    self.running_data.fill_(scale.log2().clamp(min=-24, max=24))
+    scale_log2 = torch.as_tensor(
+        scale,
+        dtype=torch.float64 if self._is_high_precision() else torch.float32,
+        device=self.scale.device,
+    ).log2()
+    self.running_data.fill_(scale_log2.clamp(min=-24, max=24))
     running_data = self.data_bits - 1 - self.running_data.squeeze(0)
-    running_data = self.quant_round(running_data, self.round_mode)
+    running_data = self._limit_scale_exponent(
+        self.quant_round(running_data, self.round_mode)
+    )
     scale = torch.exp2(running_data)
-    self.scale = scale.clamp(min=1e-6, max=2**24)
+    self.scale.fill_(float(self._limit_scale(scale)))
 
     # 清理累积数据
     self._accumulated_hist = None
@@ -506,4 +524,3 @@ _FINALIZE_TABLE = {
 def get_finalize_function(calibrate_name):
     """获取指定校准方法的finalize函数"""
     return _FINALIZE_TABLE.get(calibrate_name, None)
-

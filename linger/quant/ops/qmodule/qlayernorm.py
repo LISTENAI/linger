@@ -175,7 +175,7 @@ class QLayerNorm(QModuleMixin, nn.LayerNorm):
             return self.bias
         fake_bias = self.bias_quantizer(
             self.bias,
-            self.weight_quantizer.scale * QLAYERNORM_NORMAL_SCALE,
+            self._bias_scale(self.weight_quantizer.scale, QLAYERNORM_NORMAL_SCALE),
         )
         if torch.onnx.is_in_onnx_export():
             return fake_bias

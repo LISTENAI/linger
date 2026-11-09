@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>模型分布观察 · Quantization Analysis</title>
+  <style>__STYLE__</style>
+</head>
+<body>
+<div class="water-light" aria-hidden="true"><i class="bubble bubble-a"></i><i class="bubble bubble-b"></i><i class="bubble bubble-c"></i><i class="bubble bubble-d"></i></div>
+<div class="shell">
+  <header class="masthead">
+    <a class="brand" href="#top"><span class="brand-orb" aria-hidden="true"></span><span>分布观察室 <small>QUANTIZATION ANALYSIS</small></span></a>
+    <span class="document-tag">模型分析报告 <i aria-hidden="true"></i> SVG</span>
+  </header>
+  <main id="top">
+    <section class="hero">
+      <div class="hero-copy"><p class="eyebrow">FLOAT &amp; QUANTIZED / DISTRIBUTIONS</p><h1>看见模型的<br><span>每一层分布。</span></h1>
+        <p class="intro">权重、偏置、激活，逐层探索。<br>让数值的聚集、长尾与变化，变得清晰可见。</p>
+        <div class="hero-meta"><span id="model-label">模型分析</span><span id="run-context"></span></div>
+      </div>
+      <div class="hero-orbits" aria-hidden="true"><div class="orbit-line orbit-one"></div><div class="orbit-line orbit-two"></div><div class="hero-sphere"><span>DISTRIBUTIONS</span><strong id="distribution-count">0</strong><span>层分布 · 自由探索</span></div><span class="satellite sat-weight">W</span><span class="satellite sat-bias">b</span><span class="satellite sat-activation">a</span></div>
+    </section>
+    <nav class="section-nav" aria-label="分布章节导航">
+      <a href="#weights"><span class="nav-dot weight-dot"></span>Weight <span id="weight-count" class="nav-count">0</span></a>
+      <a href="#biases"><span class="nav-dot bias-dot"></span>Bias <span id="bias-count" class="nav-count">0</span></a>
+      <a href="#activations"><span class="nav-dot activation-dot"></span>Activation <span id="activation-count" class="nav-count">0</span></a>
+      <a href="#diagnostics" class="diagnostic-link">异常定位 <span id="issue-count" class="nav-count">0</span></a>
+    </nav>
+    <div class="reading-guide"><div class="legend" id="legend"></div><span>同层共享横纵坐标 · 悬停或点按查看数值 · 每图可导出 SVG</span></div>
+    <section id="diagnostics" class="diagnostics" aria-label="异常定位" aria-live="polite"></section>
+    <div class="glass search-panel" role="search" aria-label="搜索层分布">
+      <label for="layer-search">查找层分布 <span>按层名关键词搜索</span></label>
+      <div class="search-field"><input id="layer-search" type="search" placeholder="例如 features.0 或 classifier" autocomplete="off" spellcheck="false" aria-describedby="search-status"><button id="clear-search" type="button" disabled>清空</button></div>
+      <p id="search-status" role="status" aria-live="polite"></p>
+    </div>
+    <section id="weights" class="distribution-section" aria-labelledby="weight-title">
+      <div class="section-title"><div class="section-index">01</div><div><p class="eyebrow">PARAMETER DISTRIBUTIONS</p><h2 id="weight-title">权重 <em>Weight</em></h2><p class="section-desc">查看每一层权重的取值范围、集中区域与量化前后的形态变化。</p></div><span class="section-counter" id="weight-summary"></span></div>
+      <div class="gallery-toolbar"><div class="series-switch" role="group" aria-label="权重显示内容" data-category="weight"><button type="button" data-mode="all" aria-pressed="true">全部</button><button type="button" data-mode="float" aria-pressed="false">只看浮点</button><button type="button" data-mode="quant" aria-pressed="false">只看量化</button></div><span>两行窗口 · 上下滚动查看更多</span></div>
+      <div class="gallery-window" id="weight-window" role="region" aria-labelledby="weight-title" tabindex="0"><div class="distribution-grid" id="weight-gallery"></div></div>
+    </section>
+    <section id="biases" class="distribution-section" aria-labelledby="bias-title">
+      <div class="section-title"><div class="section-index">02</div><div><p class="eyebrow">PARAMETER DISTRIBUTIONS</p><h2 id="bias-title">偏置 <em>Bias</em></h2><p class="section-desc">独立呈现每一层偏置分布，观察偏移、离散化与零值变化。</p></div><span class="section-counter" id="bias-summary"></span></div>
+      <div class="gallery-toolbar"><div class="series-switch" role="group" aria-label="偏置显示内容" data-category="bias"><button type="button" data-mode="all" aria-pressed="true">全部</button><button type="button" data-mode="float" aria-pressed="false">只看浮点</button><button type="button" data-mode="quant" aria-pressed="false">只看量化</button></div><span>两行窗口 · 上下滚动查看更多</span></div>
+      <div class="gallery-window" id="bias-window" role="region" aria-labelledby="bias-title" tabindex="0"><div class="distribution-grid" id="bias-gallery"></div></div>
+    </section>
+    <section id="activations" class="distribution-section" aria-labelledby="activation-title">
+      <div class="section-title"><div class="section-index">03</div><div><p class="eyebrow">FORWARD DISTRIBUTIONS</p><h2 id="activation-title">激活 <em>Activation</em></h2><p class="section-desc">输入与输出分别展示，追踪数据在各层之间的分布变化。</p></div><span class="section-counter" id="activation-summary"></span></div>
+      <div class="gallery-toolbar"><div class="series-switch" role="group" aria-label="激活显示内容" data-category="activation"><button type="button" data-mode="all" aria-pressed="true">全部</button><button type="button" data-mode="float" aria-pressed="false">只看浮点</button><button type="button" data-mode="quant" aria-pressed="false">只看量化</button></div><span>两行窗口 · 上下滚动查看更多</span></div>
+      <div class="gallery-window" id="activation-window" role="region" aria-labelledby="activation-title" tabindex="0"><div class="distribution-grid" id="activation-gallery"></div></div>
+    </section>
+    <section class="supporting-section">
+      <details class="glass details-panel"><summary>完整统计记录 <span id="record-count"></span></summary><div class="table-wrap"><table><thead><tr><th>定位</th><th>模型</th><th>层名</th><th>张量</th><th>状态 / 原因</th><th>Min</th><th>Max</th><th>Mean</th><th>Std</th><th>P99</th><th>零值比例</th><th>NaN / Inf</th></tr></thead><tbody id="rows"></tbody></table></div></details>
+      <details class="glass details-panel"><summary>图表与异常判定说明</summary><div class="method-note"><p>所有图表均由已采集的直方图绘制，统一分箱的采样占比按原 bin 内均匀分布近似重建；常量张量按点质量处理。显示轮廓连接各分箱，面积与透明度仅用于辅助辨识。直方图与分位数基于采样，范围与均值基于全部有限值。</p><p id="rules"></p><p>没有触发规则不等于量化已被证明正确。天然稀疏不直接视为异常；未采集逐元素量化边界命中率，不推断饱和或截断。完整运行信息保留在 JSON 中。</p></div></details>
+    </section>
+    <footer><span><span class="footer-dot"></span>模型分布观察 · 离线报告</span><span>生成时间：__GENERATED__</span><a href="#top">回到顶部 ↑</a></footer>
+    <noscript>请启用 JavaScript 查看全部分布图；完整统计可在 layer_records.json 和 layer_metrics.csv 中查看。</noscript>
+  </main>
+</div>
+<div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+<script id="analysis-data" type="application/json">__PAYLOAD__</script>
+<script>__SCRIPT__</script>
+</body></html>

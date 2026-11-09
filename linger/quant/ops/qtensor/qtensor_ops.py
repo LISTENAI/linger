@@ -156,13 +156,19 @@ def cat(op, input, dim = 0):
     if module_self is None:
         return qfallback(op, input, dim)
 
-    iname_index = getattr(module_self, LINGER_QTENSOR_LAYER_COUNTER)
-    setattr(module_self, LINGER_QTENSOR_LAYER_COUNTER, iname_index+1)
-    var_name = LINGER_QTENSOR_LAYERS_PREIFX + '_qcat_' + str(iname_index)
+    iname_index = getattr(module_self, LINGER_QTENSOR_CONCAT_LAYER_COUNTER)
+    setattr(module_self, LINGER_QTENSOR_CONCAT_LAYER_COUNTER, iname_index+1)
+    var_name = LINGER_QTENSOR_CONCAT_LAYERS_PREIFX + '_qcat_' + str(iname_index)
+    # Checkpoints written before the dedicated concat namespace used the
+    # ordinary QTensor prefix.  Reuse that module when loading such a
+    # checkpoint so changing the counter does not silently discard its scales.
+    legacy_var_name = LINGER_QTENSOR_LAYERS_PREIFX + '_qcat_' + str(iname_index)
 
     q_layer = None
     if hasattr(module_self, var_name):
         q_layer = getattr(module_self, var_name)
+    elif hasattr(module_self, legacy_var_name):
+        q_layer = getattr(module_self, legacy_var_name)
     else:
         q_layer = QCat(activate_config = QUANT_CONFIGS.quant_info.to_dict(), num_input = 2, is_cat=True)
         q_layer.train(module_self.training)
@@ -498,4 +504,3 @@ def topk(op, input, *args, **kwargs):
         out = op(tmp_input, *args, **kwargs)
         return from_tensor_to_qtensor(out, scale, data_bits)
     return op(input, *args, **kwargs)
-

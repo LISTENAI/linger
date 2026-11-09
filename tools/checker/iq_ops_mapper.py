@@ -276,7 +276,7 @@ def maxpool2d(inputs, kwargs):
         attr_pads = kwargs.get('pads', None)
         # scale = input.scale
         # data_bits = input.data_bits
-        input = F.pad(input, (attr_pads[0], attr_pads[2], attr_pads[1], attr_pads[3]), mode="constant", value=-float("inf"))
+        input = F.pad(input, (attr_pads[1], attr_pads[3], attr_pads[0], attr_pads[2]), mode="constant", value=-float("inf"))
         # input = from_tensor_to_qtensor(input, scale, data_bits, 0)
 
     module = nn.MaxPool2d(kernel_size, strides, pads, dilations, False, ceil_mode)
@@ -305,8 +305,10 @@ def iqvar(inputs, kwargs):
     kwargs = canonicalize_attrs(kwargs)
 
     dim = kwargs.get('dims', -1)
-    unbiased = kwargs.get('unbiased', True)
-    keepdim = kwargs.get('keepdim', True)
+    unbiased = kwargs.get('unbiased', 1)
+    unbiased = True if unbiased == 1 else False
+    keepdim = kwargs.get('keepdim', 1)
+    keepdim = True if keepdim == 1 else False
 
     instance = create_qmodule_tensor(QVar, None, 1, kwargs)
     if input_0.dtype != torch.float32:

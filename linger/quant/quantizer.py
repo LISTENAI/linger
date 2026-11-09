@@ -4,6 +4,7 @@ from typing import Optional, Union, Dict, Any
 
 from .qtensor import QTensor
 from .calibrate_funs import get_calibrate_function, get_finalize_function
+from .mom_fake_quant import NativeMOMFakeQuant
 from ..config  import QUANT_CONFIGS
 from ..utils import QuantMode, QuantStrategy, ActivationType, FakeQuantMethod, QatMethod, PlatForm
 import lingerext
@@ -38,53 +39,71 @@ class FakeQuantOnnxFunction(torch.autograd.Function):
 
 class FAKEQUANT(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, data_bits, learning_data, scale_min, quant_min, quant_max):
-        out, mask, scale_tmp = lingerext.fake_quant(input, data_bits, float(learning_data), float(scale_min), quant_min, quant_max)
+    def forward(ctx, input, data_bits, learning_data, scale_min, quant_min, quant_max, round_mode):
+        out, mask, scale_tmp = lingerext.fake_quant(
+            input, data_bits, float(learning_data), float(scale_min), quant_min, quant_max, round_mode
+        )
         ctx.save_for_backward(mask.bool())
         return out, scale_tmp
 
     @staticmethod
     def backward(ctx, gradOutput1, gradOutput2):
         mask = ctx.saved_tensors
-        return gradOutput1.masked_fill(mask[0], 0.0), None, None, None, None, None
+        return gradOutput1.masked_fill(mask[0], 0.0), None, None, None, None, None, None
 
 class BIASQUANT(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, data_bits, scale_bias, scale_min, quant_min, quant_max):
-        out,mask = lingerext.bias_quant(input, data_bits, float(scale_bias), float(scale_min), quant_min, quant_max)
+    def forward(ctx, input, data_bits, scale_bias, scale_min, quant_min, quant_max, round_mode):
+        out,mask = lingerext.bias_quant(
+            input, data_bits, float(scale_bias), float(scale_min), quant_min, quant_max, round_mode
+        )
         ctx.save_for_backward(mask.bool())
         return out
     @staticmethod
     def backward(ctx, gradOutput):
         mask = ctx.saved_tensors
-        return gradOutput.masked_fill(mask[0], 0.0), None, None, None, None, None
+        return gradOutput.masked_fill(mask[0], 0.0), None, None, None, None, None, None
 
 class FAKEQUANT_WITH_GRAD_SACLE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, data_bits, learning_data, scale_min, quant_min, quant_max):
-        out, mask, learning_data_coff_back, scale_tmp = lingerext.fake_quant_with_grad_scale(input, data_bits, float(learning_data), float(scale_min), quant_min, quant_max)
+    def forward(ctx, input, data_bits, learning_data, scale_min, quant_min, quant_max, round_mode):
+        out, mask, learning_data_coff_back, scale_tmp = lingerext.fake_quant_with_grad_scale(
+            input, data_bits, float(learning_data), float(scale_min), quant_min, quant_max, round_mode
+        )
         saved_tensors = [mask.bool(), learning_data_coff_back]
         ctx.save_for_backward(*saved_tensors)
+        # The extension reduces the scale gradient to a scalar, while TQT's
+        # learnable parameter is registered with shape ``[1]``.  Keep the
+        # input shape so autograd receives a gradient compatible with the
+        # original parameter on both CPU stubs and CUDA extensions.
+        ctx.learning_data_shape = learning_data.shape if torch.is_tensor(learning_data) else None
         return out, scale_tmp
 
     @staticmethod
     def backward(ctx, gradOutput1, gradOutput2):
         mask, learning_data_coff_back = ctx.saved_tensors
         grad_learning_data = (gradOutput1 * learning_data_coff_back).sum()
-        return gradOutput1.masked_fill(mask, 0.0), None, grad_learning_data, None, None, None
+        if ctx.learning_data_shape is not None:
+            grad_learning_data = grad_learning_data.reshape(ctx.learning_data_shape)
+        return gradOutput1.masked_fill(mask, 0.0), None, grad_learning_data, None, None, None, None
 
 class BIASQUANT_WITH_GRAD_SACLE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, data_bits, scale_bias, scale_min, quant_min, quant_max):
-        out,mask,scale_coff_back = lingerext.bias_quant_with_grad_scale(input, data_bits, float(scale_bias), float(scale_min), quant_min, quant_max)
+    def forward(ctx, input, data_bits, scale_bias, scale_min, quant_min, quant_max, round_mode):
+        out,mask,scale_coff_back = lingerext.bias_quant_with_grad_scale(
+            input, data_bits, float(scale_bias), float(scale_min), quant_min, quant_max, round_mode
+        )
         saved_tensors = [mask.bool(), scale_coff_back]
         ctx.save_for_backward(*saved_tensors)
+        ctx.scale_bias_shape = scale_bias.shape if torch.is_tensor(scale_bias) else None
         return out
     @staticmethod
     def backward(ctx, gradOutput):
         mask,  scale_coff_back = ctx.saved_tensors
         grad_scale = (gradOutput * scale_coff_back).sum()
-        return gradOutput.masked_fill(mask, 0.0), None, grad_scale, None, None, None
+        if ctx.scale_bias_shape is not None:
+            grad_scale = grad_scale.reshape(ctx.scale_bias_shape)
+        return gradOutput.masked_fill(mask, 0.0), None, grad_scale, None, None, None, None
 
 
 class Quantizer(torch.nn.Module, ):
@@ -157,6 +176,11 @@ class Quantizer(torch.nn.Module, ):
             self.learning_data = quantizer.learning_data
     
     def quant_round(self, x, mode):
+        # High precision deployment uses FP64 for the scale exponent and
+        # rounding decision.  Keep this conversion here so MOM, TQT and
+        # calibration share exactly the same exponent semantics.
+        if self._is_high_precision() and torch.is_tensor(x) and x.is_floating_point():
+            x = x.to(torch.float64)
         if mode == QuantMode.floor_add: 
             out = ((x + 0.5).floor() - x).detach() + x
         elif mode == QuantMode.floor:
@@ -174,6 +198,8 @@ class Quantizer(torch.nn.Module, ):
             max_scale = HIGH_PRECISION_SCALE_MAX
 
         if torch.is_tensor(scale):
+            if self._is_high_precision() and scale.is_floating_point():
+                scale = scale.to(torch.float64)
             return scale.clamp(min=1, max=max_scale)
 
         scale = max(float(scale), 1.0)
@@ -182,6 +208,8 @@ class Quantizer(torch.nn.Module, ):
         return scale
 
     def _limit_scale_exponent(self, exponent):
+        if self._is_high_precision() and torch.is_tensor(exponent) and exponent.is_floating_point():
+            exponent = exponent.to(torch.float64)
         max_exponent = (
             HIGH_PRECISION_SCALE_EXPONENT_MAX
             if self._is_high_precision() and not self.is_bias_quantizer
@@ -192,10 +220,23 @@ class Quantizer(torch.nn.Module, ):
     def _limit_factor_for_extension(self, factor):
         if not self._is_high_precision() or self.is_bias_quantizer:
             return factor
+        if torch.is_tensor(factor) and factor.is_floating_point():
+            factor = factor.to(torch.float64)
         min_factor = self.data_bits - 1 - HIGH_PRECISION_SCALE_EXPONENT_MAX
         return factor.clamp(min=min_factor)
 
-    def _fake_quant_with_scale(self, input, scale):
+    def _to_transport_dtype(self, tensor):
+        """Return the dtype crossing the quantizer/QTensor interface.
+
+        High precision arithmetic is performed in FP64, while the chip
+        transport representation for non-bias fake-quantized tensors remains
+        FP32.  Bias keeps its existing FP64 path.
+        """
+        if self._is_high_precision() and not self.is_bias_quantizer:
+            return tensor.to(torch.float32)
+        return tensor
+
+    def _fake_quant_with_scale(self, input, scale, optimize_mom=False):
         if self.is_bias_quantizer:
             compute_input = input.to(torch.float64)
             if isinstance(scale, torch.Tensor):
@@ -203,38 +244,76 @@ class Quantizer(torch.nn.Module, ):
             else:
                 compute_scale = float(scale)
         elif self._is_high_precision():
-            compute_input = input.to(torch.float32)
+            compute_input = input.to(torch.float64)
             if isinstance(scale, torch.Tensor):
-                compute_scale = scale.to(dtype=torch.float32, device=input.device)
+                compute_scale = scale.to(dtype=torch.float64, device=input.device)
             else:
                 compute_scale = float(scale)
         else:
             compute_input = input
             compute_scale = scale
 
-        x_s = compute_input * compute_scale
-        x_int = self.quant_round(x_s, self.round_mode)
-        x_int = x_int.clamp(self.quant_min, self.quant_max)
-        fake_input = x_int / compute_scale
-        if not self.is_bias_quantizer and (self._is_high_precision() or self.data_bits <= 8):
+        if optimize_mom and not (torch.is_tensor(compute_scale) and compute_scale.requires_grad):
+            fake_input = NativeMOMFakeQuant.apply(
+                compute_input, compute_scale, self.quant_min, self.quant_max, self.round_mode
+            )
+        else:
+            x_s = compute_input * compute_scale
+            x_int = self.quant_round(x_s, self.round_mode)
+            x_int = x_int.clamp(self.quant_min, self.quant_max)
+            fake_input = x_int / compute_scale
+        if not self.is_bias_quantizer and self.data_bits <= 8:
             return fake_input.to(torch.float32)
         return fake_input
        
     def fake_quant_native(self, input, scale_bias = None):
+        optimize_mom = (
+            self.qat_method == QatMethod.MOM
+            and QUANT_CONFIGS.mom_native_optimized
+            # The original first observation adopts the input's dtype/device.
+            # Use it for unusual mixed-dtype/device initial states as well.
+            and (
+                scale_bias is not None
+                or (
+                    input.dtype == self.running_data.dtype
+                    and input.device == self.running_data.device
+                    and input.device == self.is_init.device
+                )
+            )
+        )
         if scale_bias is None:
             if self.qat_method == QatMethod.TQT:
-                learning_data_temp = self.data_bits - 1 - self.learning_data
+                learning_data = self.learning_data
+                if self._is_high_precision():
+                    learning_data = learning_data.to(torch.float64)
+                learning_data_temp = self.data_bits - 1 - learning_data
             elif self.qat_method == QatMethod.MOM:
-                if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
-                    abs_max = input.max()
+                if optimize_mom:
+                    # Statistics have no gradients. Cache initialization state
+                    # until its buffer changes to avoid a scalar GPU read.
+                    with torch.no_grad():
+                        if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+                            abs_max = input.max()
+                        else:
+                            abs_max = input.abs().max()
+                        abs_max = abs_max.clamp(min=1e-6)
+                        if self._mom_buffer_initialized('is_init'):
+                            self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+                        else:
+                            self.running_data = abs_max
+                            self.is_init.fill_(True)
+                            self._cache_mom_buffer_initialized('is_init', True)
                 else:
-                    abs_max = input.abs().max()
-                abs_max = abs_max.clamp(min=1e-6).detach()
-                if not self.is_init:
-                    self.running_data = abs_max
-                    self.is_init.fill_(True)
-                else:
-                    self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
+                    if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
+                        abs_max = input.max()
+                    else:
+                        abs_max = input.abs().max()
+                    abs_max = abs_max.clamp(min=1e-6).detach()
+                    if not self.is_init:
+                        self.running_data = abs_max
+                        self.is_init.fill_(True)
+                    else:
+                        self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
                 learning_data_temp = self.data_bits - 1 - self.running_data.log2()
                 # self.running_data.to(input.device).mul_(1-self.momentum).add_(self.momentum * abs_max.detach())
             else:
@@ -246,13 +325,33 @@ class Quantizer(torch.nn.Module, ):
         else:
             scale = self._limit_scale(scale_bias)
 
-        if hasattr(self, "min_scale") and scale > self.min_scale:
-            scale = self.min_scale
-            self.scale.fill_(float(scale))
+        if hasattr(self, "min_scale"):
+            if (
+                optimize_mom
+                and torch.is_tensor(scale)
+                and torch.is_tensor(self.min_scale)
+                and scale.dtype == self.min_scale.dtype
+                and scale.device == self.min_scale.device
+                and scale.shape == self.min_scale.shape
+                and not self.min_scale.requires_grad
+            ):
+                # Preserve the original conditional's NaN behavior as well as
+                # its dtype; torch.minimum would propagate a NaN bound.
+                scale = torch.where(scale > self.min_scale, self.min_scale, scale)
+            elif scale > self.min_scale:
+                scale = self.min_scale
+                if not optimize_mom:
+                    self.scale.fill_(float(scale))
         
-        fake_input = self._fake_quant_with_scale(input, scale)
+        fake_input = self._fake_quant_with_scale(input, scale, optimize_mom=optimize_mom and self.training)
 
-        self.scale.fill_(float(scale))
+        if optimize_mom and torch.is_tensor(scale):
+            # copy_ casts exactly as fill_(float(scale)) does, without copying a
+            # device scalar to the CPU. The computed scale remains independent
+            # of this mutable buffer, which is important for backward.
+            self.scale.copy_(scale.detach().reshape(()))
+        else:
+            self.scale.fill_(float(scale))
         # self.scale.mul_(0).add_(scale) # MOM也必须要给scale初始化，便于后续(如bias)调用使用当前模块scale时保持正确
 
         return fake_input
@@ -301,6 +400,14 @@ class Quantizer(torch.nn.Module, ):
         return fake_input
 
     def fake_quant_cuda(self, input, scale_bias = None):
+        # Keep MOM statistics in the original input dtype, just as the native
+        # path does.  High precision conversion is applied only to the fake
+        # quant arithmetic below; converting before abs_max would change the
+        # running_data dtype and can move an exponent tie across a rounding
+        # boundary for FP16/FP32 inputs.
+        stats_input = input
+        if self._is_high_precision() and torch.is_tensor(input) and input.is_floating_point():
+            input = input.to(torch.float64)
         if hasattr(self, "min_scale"): # 只有add算子的outputquantizer有min_scale，其余情况min_scale和正常的scale相同
             min_scale = self.min_scale
         else:
@@ -309,12 +416,12 @@ class Quantizer(torch.nn.Module, ):
         if scale_bias is None:
             if self.qat_method == QatMethod.TQT:
                 factor = self._limit_factor_for_extension(self.learning_data)
-                out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max)
+                out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
             elif self.qat_method == QatMethod.MOM:
                 if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
-                    abs_max = input.max()
+                    abs_max = stats_input.max()
                 else:
-                    abs_max = input.abs().max()
+                    abs_max = stats_input.abs().max()
                 abs_max = abs_max.clamp(min=1e-6).detach()
                 if not self.is_init:
                     self.running_data = abs_max
@@ -322,15 +429,20 @@ class Quantizer(torch.nn.Module, ):
                 else:
                     self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
                 factor = self._limit_factor_for_extension(self.running_data.log2())
-                out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max)
+                out, scale_tmp = FAKEQUANT.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
         else:
             scale_bias = self._limit_scale(scale_bias)
-            out = BIASQUANT.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
+            out = BIASQUANT.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
             scale_tmp = scale_bias.detach()
         self.scale.fill_(scale_tmp) # MOM也必须要给scale初始化，便于后续(如bias)调用当前模块scale时保持正确
         return out
 
     def fake_quant_cuda_with_grad_scale(self, input, scale_bias = None):
+        # See fake_quant_cuda: preserve the original MOM statistics dtype and
+        # convert only the quantization arithmetic to FP64.
+        stats_input = input
+        if self._is_high_precision() and torch.is_tensor(input) and input.is_floating_point():
+            input = input.to(torch.float64)
         if hasattr(self, "min_scale"): # 只有add算子的outputquantizer有min_scale，其余情况min_scale和正常的scale相同
             min_scale = self.min_scale
         else:
@@ -339,12 +451,12 @@ class Quantizer(torch.nn.Module, ):
         if scale_bias is None:
             if self.qat_method == QatMethod.TQT:
                 factor = self._limit_factor_for_extension(self.learning_data)
-                out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max)
+                out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
             elif self.qat_method == QatMethod.MOM:
                 if hasattr(self, "activation_type") and self.activation_type == ActivationType.Relu:
-                    abs_max = input.max()
+                    abs_max = stats_input.max()
                 else:
-                    abs_max = input.abs().max()
+                    abs_max = stats_input.abs().max()
                 abs_max = abs_max.clamp(min=1e-6).detach()
                 if not self.is_init:
                     self.running_data = abs_max
@@ -352,10 +464,10 @@ class Quantizer(torch.nn.Module, ):
                 else:
                     self.running_data = (1-self.momentum) * self.running_data + self.momentum * abs_max
                 factor = self._limit_factor_for_extension(self.running_data.log2())
-                out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max)
+                out, scale_tmp = FAKEQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, factor, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
         else:
             scale_bias = self._limit_scale(scale_bias)
-            out = BIASQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max)
+            out = BIASQUANT_WITH_GRAD_SACLE.apply(input, self.data_bits, scale_bias, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
             scale_tmp = scale_bias.detach()
         self.scale.fill_(scale_tmp) # MOM也必须要给scale初始化，便于后续(如bias)调用当前模块scale时保持正确
         return out
@@ -375,10 +487,12 @@ class Quantizer(torch.nn.Module, ):
         else:
             scale = self._limit_scale(scale)
         if hasattr(self, "min_scale") and scale > self.min_scale:
-            scale = self.min_scale
+            scale = self._limit_scale(self.min_scale)
         self.scale.fill_(float(scale))
+        if self._is_high_precision() and torch.is_tensor(input) and input.is_floating_point():
+            input = input.to(torch.float64)
         if QUANT_CONFIGS.quant_method == FakeQuantMethod.CUDA and not self.is_bias_quantizer:
-            out = BIASQUANT.apply(input, self.data_bits, scale, min_scale, self.quant_min, self.quant_max)
+            out = BIASQUANT.apply(input, self.data_bits, scale, min_scale, self.quant_min, self.quant_max, self.round_mode.value)
         else:
             out = self.fake_quant_native(input, scale)
         return out
@@ -386,15 +500,20 @@ class Quantizer(torch.nn.Module, ):
     def forward(self, input, scale=None):
         if torch.onnx.is_in_onnx_export():
             return FakeQuantOnnxFunction.apply(input)
-        if self._is_high_precision() and not self.is_bias_quantizer:
-            input = input.to(torch.float32)
         if QUANT_CONFIGS.calibration:
-            return self.init_quant_data(input)
+            fake_input = self.init_quant_data(input)
         elif not self.training:
-            return self.inference(input, scale)
+            fake_input = self.inference(input, scale)
         else:
             # only weight clamp
-            if self.qat_method == QatMethod.MOM and hasattr(self, "is_init_mom_clamp_weight") and self.is_init_mom_clamp_weight == False:
+            if self.qat_method == QatMethod.MOM and hasattr(self, "is_init_mom_clamp_weight"):
+                if QUANT_CONFIGS.mom_native_optimized:
+                    clamp_initialized = self._mom_buffer_initialized('is_init_mom_clamp_weight')
+                else:
+                    clamp_initialized = not bool(self.is_init_mom_clamp_weight == False)
+            else:
+                clamp_initialized = True
+            if not clamp_initialized:
                 with torch.no_grad():
                     if hasattr(self, "clamp_factor") and self.clamp_factor is not None:
                         clamp_data = input.abs().mean() * self.clamp_factor
@@ -404,6 +523,8 @@ class Quantizer(torch.nn.Module, ):
                         clamp_data = None
                     input.data = input if clamp_data is None else torch.clamp(input, min = -clamp_data, max = clamp_data)
                 self.is_init_mom_clamp_weight.fill_(True)
+                if QUANT_CONFIGS.mom_native_optimized:
+                    self._cache_mom_buffer_initialized('is_init_mom_clamp_weight', True)
 
             if self.is_bias_quantizer:
                 fake_input = self.fake_quant_native(input, scale)
@@ -413,7 +534,33 @@ class Quantizer(torch.nn.Module, ):
                 fake_input = self.fake_quant_cuda_with_grad_scale(input, scale)
             else:
                 fake_input = self.fake_quant_native(input, scale)
-        return fake_input
+        return self._to_transport_dtype(fake_input)
+
+    def _mom_buffer_initialized(self, name):
+        """Read an initialization flag once until its tensor or value changes.
+
+        Buffer identity and version cover device moves, state_dict loading,
+        deepcopy, and explicit in-place flag resets without checkpoint changes.
+        """
+        flag = getattr(self, name)
+        try:
+            key = (id(flag), flag._version)
+        except RuntimeError:
+            # Tensors constructed under inference_mode have no version counter.
+            return bool(flag)
+        cache_name = '_mom_cached_' + name
+        cached = getattr(self, cache_name, None)
+        if cached is None or cached[0] != key:
+            cached = (key, bool(flag))
+            setattr(self, cache_name, cached)
+        return cached[1]
+
+    def _cache_mom_buffer_initialized(self, name, initialized):
+        flag = getattr(self, name)
+        try:
+            setattr(self, '_mom_cached_' + name, ((id(flag), flag._version), initialized))
+        except RuntimeError:
+            pass
     
     # def state_dict(self, *args, **kwargs):
     #     with torch.no_grad():

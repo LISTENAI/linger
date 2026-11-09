@@ -101,6 +101,9 @@ class ClampInfo():
 class QuantConfig(Singleton):
     open_quant   = True
     quant_method = FakeQuantMethod.NATIVE
+    # Keep native MOM arithmetic unchanged while avoiding scalar GPU reads.
+    # Set False to run the original implementation for regression comparisons.
+    mom_native_optimized = True
     device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype        = torch.float32
     seed         = 42
@@ -130,7 +133,7 @@ class QuantConfig(Singleton):
 
         # 解析混合精度 partX 节（含 name 子键的 dict 均视为 part）
         cls.mix_parts = []
-        _known_keys = {'open_quant', 'quant_method', 'device', 'dtype', 'seed',
+        _known_keys = {'open_quant', 'quant_method', 'mom_native_optimized', 'device', 'dtype', 'seed',
                        'calibration', 'platform', 'clamp_info', 'quant_info', 'mix_parts'}
         for key, value in config_data.items():
             if key in _known_keys or not isinstance(value, dict) or 'name' not in value:

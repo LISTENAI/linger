@@ -2,31 +2,78 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <type_traits>
+#include <cmath>
 
-constexpr float NEG_LN2 = -0.69314718055994530941723212145818;
+constexpr double NEG_LN2 = -0.69314718055994530941723212145818;
+
+template <typename scalar_t>
+using compute_t = typename std::conditional<std::is_same<scalar_t, double>::value, double, float>::type;
+
+// torch.round uses ties-to-even.  Keep the exponent decision explicit rather
+// than relying on std::round, whose tie rule is away-from-zero.
+inline double round_ties_even_host(double x) {
+    if (!std::isfinite(x)) {
+        return x;
+    }
+    const double lower = std::floor(x);
+    const double fraction = x - lower;
+    if (fraction < 0.5) {
+        return lower;
+    }
+    if (fraction > 0.5) {
+        return lower + 1.0;
+    }
+    return std::fmod(std::fabs(lower), 2.0) == 0.0 ? lower : lower + 1.0;
+}
+
+template <typename calc_t>
+__device__ inline calc_t quant_round(calc_t value, int64_t round_mode) {
+    if (round_mode == 0) { // QuantMode.floor
+        return floor(value);
+    }
+    if (round_mode == 1) { // QuantMode.floor_add
+        return floor(value + static_cast<calc_t>(0.5));
+    }
+    // QuantMode.round (and the existing Python fallback for QuantMode.ceil):
+    // rint/rintf are ties-to-even, matching torch.round.
+    return rint(value);
+}
 
 template <typename scalar_t>
 __global__ void fake_quant_kernel(
     const scalar_t* __restrict__ input,
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ mask,
-    const float scale,
-    const float quant_min,
-    const float quant_max,
+    const double scale,
+    const double quant_min,
+    const double quant_max,
+    const int64_t round_mode,
     const int64_t numel) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {
-        float x_s = static_cast<float>(input[idx]) * scale;
+        using calc_t = compute_t<scalar_t>;
+        const calc_t scale_value = static_cast<calc_t>(scale);
+        const calc_t quant_min_value = static_cast<calc_t>(quant_min);
+        const calc_t quant_max_value = static_cast<calc_t>(quant_max);
+        calc_t x_s = static_cast<calc_t>(input[idx]) * scale_value;
         // 量化 (四舍五入)
-        float q = floorf(x_s + 0.5f);
+        const calc_t q_raw = quant_round(x_s, round_mode);
+        calc_t q = q_raw;
         // clamp
-        q = fminf(fmaxf(q, (float)quant_min), (float)quant_max);
+        q = q < quant_min_value ? quant_min_value : q;
+        q = q > quant_max_value ? quant_max_value : q;
         // clamp的mask,用于backward
-        bool is_clamped = (q == (float)quant_min) || (q == (float)quant_max);
+        // ``mask`` marks values whose gradient is suppressed.  A value that
+        // rounds exactly to a representable endpoint is still inside the
+        // saturation interval and must keep its STE gradient, matching the
+        // native fake quantizer.  Only the pre-clamp value outside the range
+        // is suppressed.
+        bool is_clamped = !(q_raw >= quant_min_value && q_raw <= quant_max_value);
         mask[idx] = static_cast<scalar_t>(is_clamped);
         // 反量化
-        output[idx] = static_cast<scalar_t>(q / scale);
+        output[idx] = static_cast<scalar_t>(q / scale_value);
         // if ( (idx % 10000) ==0){
         //     printf("[%d], x_s=%f, q = %f, output=%f \r\n", idx, x_s, q, output[idx]);
         // }
@@ -34,17 +81,18 @@ __global__ void fake_quant_kernel(
 }
 
 
-std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(
+std::tuple<torch::Tensor, torch::Tensor, double> fake_quant_cuda(
     torch::Tensor input,
     int bit,
-    float factor,
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double factor,
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     // printf("到位置 2 了 \n");
     // 计算 scale
-    float f = (float)(bit - 1) - factor;
-    float scale = powf(2.0f, fmaxf(roundf(f), 0.0f));
+    double f = static_cast<double>(bit - 1) - factor;
+    double scale = exp2(fmax(round_ties_even_host(f), 0.0));
     // scale = fminf(fmaxf(scale, 1e-6f), powf(2.0f, 32));
     // printf("到位置 1 了,scale:%f \n", scale);
     auto output = torch::empty_like(input);
@@ -70,6 +118,7 @@ std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(
             scale,
             quant_min,
             quant_max,
+            round_mode,
             input.numel());
     }));
     // cudaDeviceSynchronize();
@@ -84,10 +133,11 @@ std::tuple<torch::Tensor, torch::Tensor, float> fake_quant_cuda(
 std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(
     torch::Tensor input,
     int bit,
-    float scale, // 这里scale是在python代码里进行clamp到0-31的
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double scale, // 这里scale是在python代码里进行clamp到0-31的
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     
     auto output = torch::empty_like(input);
     auto mask = torch::empty_like(input); 
@@ -107,6 +157,7 @@ std::tuple<torch::Tensor, torch::Tensor> bias_quant_cuda(
             scale,
             quant_min,
             quant_max,
+            round_mode,
             input.numel());
     }));
 
@@ -131,30 +182,38 @@ __global__ void fake_quant_kernel_with_grad_scale(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ mask,
     scalar_t* __restrict__ scale_coff_back,
-    const float scale,
-    const float learning_data_coff,
-    const float quant_min,
-    const float quant_max,
+    const double scale,
+    const double learning_data_coff,
+    const double quant_min,
+    const double quant_max,
+    const int64_t round_mode,
     const int64_t numel) {
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {
-        float x_s = static_cast<float>(input[idx]) * scale;
+        using calc_t = compute_t<scalar_t>;
+        const calc_t scale_value = static_cast<calc_t>(scale);
+        const calc_t quant_min_value = static_cast<calc_t>(quant_min);
+        const calc_t quant_max_value = static_cast<calc_t>(quant_max);
+        const calc_t learning_data_coeff_value = static_cast<calc_t>(learning_data_coff);
+        calc_t x_s = static_cast<calc_t>(input[idx]) * scale_value;
         // 量化 (四舍五入)
-        float q = floorf(x_s + 0.5f);
+        const calc_t q_raw = quant_round(x_s, round_mode);
+        calc_t q = q_raw;
         // clamp
-        q = fminf(fmaxf(q, (float)quant_min), (float)quant_max);
+        q = q < quant_min_value ? quant_min_value : q;
+        q = q > quant_max_value ? quant_max_value : q;
         // clamp的mask,用于backward
-        bool is_clamped = ((q == quant_min) || (q == quant_max));
+        bool is_clamped = !(q_raw >= quant_min_value && q_raw <= quant_max_value);
         
         mask[idx] = static_cast<scalar_t>(is_clamped);
         // 反量化
-        output[idx] = static_cast<scalar_t>(q / scale);
+        output[idx] = static_cast<scalar_t>(q / scale_value);
         // if ( (idx % 10000) ==0){
         //     printf("[%d], x_s=%f, q = %f, output=%f \r\n", idx, x_s, q, output[idx]);
         // }
 
-        scale_coff_back[idx] = static_cast<scalar_t>((mask[idx] * (-output[idx] * learning_data_coff / scale ) + (1-mask[idx]) * (input[idx] - output[idx]) * learning_data_coff / scale));
+        scale_coff_back[idx] = static_cast<scalar_t>((mask[idx] * (-output[idx] * learning_data_coeff_value / scale_value ) + (1-mask[idx]) * (input[idx] - output[idx]) * learning_data_coeff_value / scale_value));
         // if (is_clamped){
         //     scale_coff_back[idx] = static_cast<scalar_t>(-output[idx] * learning_data_coff / scale );
         // }else{
@@ -165,17 +224,18 @@ __global__ void fake_quant_kernel_with_grad_scale(
 
 
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, float> fake_quant_cuda_with_grad_scale(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, double> fake_quant_cuda_with_grad_scale(
     torch::Tensor input,
     int bit,
-    float factor,
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double factor,
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     // printf("到位置 2 了 \n");
     // 计算 scale
-    float f = (float)(bit - 1) - factor;
-    float scale = powf(2.0f, fmaxf(roundf(f), 0.0f));
+    double f = static_cast<double>(bit - 1) - factor;
+    double scale = exp2(fmax(round_ties_even_host(f), 0.0));
     // scale = fminf(fmaxf(scale, 1e-6f), powf(2.0f, 32));
     // printf("到位置 1 了,scale:%f \n", scale);
     auto output = torch::empty_like(input);
@@ -204,6 +264,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, float> fake_quant_cuda_w
             NEG_LN2 * scale,
             quant_min,
             quant_max,
+            round_mode,
             input.numel());
     }));
     // cudaDeviceSynchronize();
@@ -218,10 +279,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, float> fake_quant_cuda_w
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_grad_scale(
     torch::Tensor input,
     int bit,
-    float scale, // 这里的scale是在python里clamp的
-    float scale_min,
-    float quant_min,
-    float quant_max) {
+    double scale, // 这里的scale是在python里clamp的
+    double scale_min,
+    double quant_min,
+    double quant_max,
+    int64_t round_mode) {
     
     auto output = torch::empty_like(input);
     auto mask = torch::empty_like(input); 
@@ -244,9 +306,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> bias_quant_cuda_with_gra
             1,
             quant_min,
             quant_max,
+            round_mode,
             input.numel());
     }));
 
     return std::make_tuple(output, mask, scale_coff_back);
 }
-

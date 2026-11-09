@@ -133,13 +133,15 @@ class QTanh(QModuleTensor):
         )
 
     def quantize_output(self, module, input, output):
-        output = self._to_transport_dtype(output)
         if (
             not torch.onnx.is_in_onnx_export()
             and QUANT_CONFIGS.platform in RUNTIME_TANH_PLATFORMS
         ):
+            if not self._uses_high_precision_compute():
+                output = self._to_transport_dtype(output)
             out_scale = torch.tensor(1 << (self.output_quantizer.data_bits - 1), dtype=torch.float32, device=output.device)
             fake_output = self.output_quantizer(output, out_scale)
+            fake_output = self._to_transport_dtype(fake_output)
             return from_tensor_to_qtensor(fake_output, self.output_quantizer.scale, self.output_quantizer.data_bits)
         return super().quantize_output(module, input, output)
     

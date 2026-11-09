@@ -1,0 +1,13 @@
+model_factory: my_model.py:build_model
+checkpoint: checkpoints/qat_best.pt
+float_checkpoint: checkpoints/float_best.pt
+inputs_path: artifacts/golden_inputs.pt
+output_dir: artifacts/quant_analysis
+max_batches: 32
+max_samples: 100000
+histogram_bins: 64
+max_histograms: 12
+device: auto
+seed: 1234
+include: []
+exclude: []
